@@ -132,6 +132,9 @@ def compute_luminance(P_T: np.ndarray, lights: List[Light],
     N = compute_normal(tri)
     v = V - P_T  # вектор от точки к наблюдателю
     
+    if np.dot(normalize(v), N) > 0:
+        return np.zeros(3)
+    
     L = np.zeros(3)
     
     for light in lights:
@@ -188,8 +191,8 @@ def main():
     P2 = np.array([2.0, 0.0, -3.0])
     
     # Локальные координаты точек
-    x_values = [0.5, 1.0, 1.5, 2.0, 10]
-    y_values = [0.5, 1.0, 1.5, 2.0, 2.5]
+    x_values = [0.5, 1.0, 1.5, 1.0, 1.5]
+    y_values = [0.5, 1.0, 1.5, 2.0, 1.5]
     
     # Положение наблюдателя
     V = np.array([2.0, 5.0, 0.0])
@@ -244,7 +247,7 @@ def main():
     
     ###################### ВЫЧИСЛЕНИЯ
     
-    # Таблица освещённости E1
+    # Таблица освещённости E1 ()
     print("\n" + "=" * 70)
     print("Освещённость E1(RGB, P_T) от источника 1")
     print("=" * 70)
