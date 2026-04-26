@@ -339,14 +339,12 @@ class PathTracer:
     def trace(self, orig: np.ndarray, direction: np.ndarray) -> np.ndarray:
         color      = np.zeros(3)
         throughput = np.ones(3)
-        last_specular = True  # первый луч из камеры — считаем «зеркальным»
 
         for depth in range(self.max_depth):
 
             tri, t = self.scene.intersect(orig, direction)
 
             if tri is None:
-                # Промахнулись — фон (чёрный)
                 break
 
             hit_point = orig + t * direction
@@ -357,45 +355,40 @@ class PathTracer:
             if np.dot(normal, direction) > 0:
                 normal = -normal
 
-            # ── Эмиссия ────────────────────────
+            # ── Эмиссия (источник света) ────────
             if mat.is_emitter:
-                # Учитываем эмиссию только если пришли по зеркальному пути,
-                # т.к. для диффузных путей эмиссия уже учтена через NEE
-                if last_specular:
-                    color += throughput * mat.emission
+                color += throughput * mat.emission
                 break
-
-            # ── Прямое освещение (NEE) ─────────
-            if not (mat.diffuse < EPS).all():
-                color += throughput * self._direct_light(hit_point, normal, mat)
-
-            # ── Выбор события: диффузия или зеркало ──
-            kd_lum = luminance(mat.diffuse)
-            ks_lum = luminance(mat.specular)
-            total  = kd_lum + ks_lum
-
-            if total < EPS:
-                break
-
-            p_diff = kd_lum / total
-
-            if np.random.random() < p_diff:
-                # Диффузное рассеяние (Ламберт)
-                new_dir = cosine_sample_hemisphere(normal)
-                throughput = throughput * mat.diffuse / p_diff
-                last_specular = False
-            else:
-                # Зеркальное отражение
-                new_dir = reflect(direction, normal)
-                throughput = throughput * mat.specular / (1.0 - p_diff)
-                last_specular = True
 
             # ── Русская рулетка ────────────────
+            total_refl = mat.diffuse + mat.specular
+            p_continue = min(max(total_refl[0], total_refl[1], total_refl[2]), 0.95)
             if depth >= self.rr_start_depth:
-                rr_prob = min(0.95, luminance(throughput))
-                if rr_prob < EPS or np.random.random() > rr_prob:
+                if np.random.random() > p_continue:
                     break
-                throughput /= rr_prob
+                throughput = throughput / p_continue
+
+            # ── Выбор типа отражения ───────────
+            diff_weight = max(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2])
+            spec_weight = max(mat.specular[0], mat.specular[1], mat.specular[2])
+            total_weight = diff_weight + spec_weight
+
+            if total_weight < EPS:
+                break
+
+            p_diff = diff_weight / total_weight
+
+            if np.random.random() < p_diff:
+                # ── Диффузное отражение ──────────
+                # NEE: прямое освещение
+                color += throughput * self._direct_light(hit_point, normal, mat)
+                # Продолжаем путь
+                new_dir = cosine_sample_hemisphere(normal)
+                throughput = throughput * mat.diffuse
+            else:
+                # ── Зеркальное отражение ─────────
+                new_dir = reflect(direction, normal)
+                throughput = throughput * mat.specular
 
             orig      = hit_point + normal * EPS
             direction = new_dir
@@ -576,7 +569,7 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
                       specular=np.array([0.95, 0.95, 0.95]))
     mixed  = Material(diffuse=np.array([0.5, 0.4, 0.1]),
                       specular=np.array([0.4, 0.4, 0.4]))
-    light_mat = Material(emission=np.array([15.0, 15.0, 12.0]))
+    light_mat = Material(emission=np.array([8.0, 8.0, 6.5]))
 
     def quad(v0, v1, v2, v3, mat):
         """Квад → два треугольника."""
