@@ -422,14 +422,13 @@ def render(scene: Scene, camera: Camera,
 
     # ── Тональная компрессия ──────────────────
     img = hdr_buffer * exposure
-    # Reinhard tonemapping: log-average luminance
+    # Нормировка по средней яркости → 0.5
     lum = 0.2126 * img[:,:,0] + 0.7152 * img[:,:,1] + 0.0722 * img[:,:,2]
-    log_mean_lum = np.exp(np.mean(np.log(lum + 1e-10)))
-    if log_mean_lum > EPS:
-        scale = 0.18 / log_mean_lum  # middle-grey key
-        img *= scale
-    # Reinhard: L_d = L / (1 + L)
-    img = img / (1.0 + img)
+    # Среднее по ненулевым пикселям (исключаем фон)
+    nonzero = lum[lum > EPS]
+    if len(nonzero) > 0:
+        mean_lum = np.mean(nonzero)
+        img *= 0.5 / mean_lum
     np.clip(img, 0.0, 1.0, out=img)
 
     # Гамма-коррекция
