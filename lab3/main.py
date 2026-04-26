@@ -76,9 +76,9 @@ class Triangle:
     material: Material
 
     def __post_init__(self):
-        e1 = self.v1 - self.v0
-        e2 = self.v2 - self.v0
-        n  = np.cross(e1, e2)
+        self.e1 = self.v1 - self.v0
+        self.e2 = self.v2 - self.v0
+        n  = np.cross(self.e1, self.e2)
         self.area   = 0.5 * np.linalg.norm(n)
         self.normal = normalize(n)
 
@@ -92,10 +92,8 @@ class Triangle:
     def intersect(self, ray_orig: np.ndarray, ray_dir: np.ndarray
                   ) -> Optional[float]:
         """Алгоритм Мёллера–Трумбора. Возвращает t или None."""
-        e1 = self.v1 - self.v0
-        e2 = self.v2 - self.v0
-        h  = np.cross(ray_dir, e2)
-        a  = np.dot(e1, h)
+        h  = np.cross(ray_dir, self.e2)
+        a  = np.dot(self.e1, h)
         if abs(a) < EPS:
             return None
         f  = 1.0 / a
@@ -103,11 +101,11 @@ class Triangle:
         u  = f * np.dot(s, h)
         if not (0.0 <= u <= 1.0):
             return None
-        q  = np.cross(s, e1)
+        q  = np.cross(s, self.e1)
         v  = f * np.dot(ray_dir, q)
         if v < 0.0 or u + v > 1.0:
             return None
-        t  = f * np.dot(e2, q)
+        t  = f * np.dot(self.e2, q)
         return t if t > EPS else None
 
 
@@ -119,34 +117,103 @@ class Scene:
     def __init__(self):
         self.triangles: List[Triangle] = []
         self._lights:   List[Triangle] = []        # кэш источников
-        self._light_areas: np.ndarray  = np.array([])
         self._light_powers: np.ndarray = np.array([])
+        self._light_pdf_map: dict = {}
+        self._accel_built = False
+        # Flat arrays: interleaved xyz, shape (3*N,)
+        self._v0f: np.ndarray = np.array([])
+        self._e1f: np.ndarray = np.array([])
+        self._e2f: np.ndarray = np.array([])
+        self._n_tri: int = 0
 
     def add_triangle(self, tri: Triangle):
         self.triangles.append(tri)
         if tri.material.is_emitter:
             self._lights.append(tri)
-        self._rebuild_light_cache()
 
     def add_triangles(self, tris: List[Triangle]):
         for t in tris:
             self.triangles.append(t)
             if t.material.is_emitter:
                 self._lights.append(t)
-        self._rebuild_light_cache()
 
     def _rebuild_light_cache(self):
         if not self._lights:
             return
-        # Мощность источника ∝ площадь × сумма каналов emission
         powers = np.array([np.sum(t.material.emission) * t.area
                            for t in self._lights])
         self._light_powers = powers / powers.sum()
+        self._light_pdf_map = {id(t): i for i, t in enumerate(self._lights)}
 
-    # ── Пересечение ────────────────────────────
+    def build_accel(self):
+        """Создать flat numpy-массивы для векторизованных пересечений."""
+        self._rebuild_light_cache()
+        N = len(self.triangles)
+        self._n_tri = N
+        if N == 0:
+            return
+        self._v0f = np.array([t.v0 for t in self.triangles]).ravel().astype(np.float64)
+        self._e1f = np.array([t.e1 for t in self.triangles]).ravel().astype(np.float64)
+        self._e2f = np.array([t.e2 for t in self.triangles]).ravel().astype(np.float64)
+        self._accel_built = True
+
+    # ── Пересечение (векторизованное, flat arrays) ──
     def intersect(self, orig: np.ndarray, direction: np.ndarray
                   ) -> Tuple[Optional[Triangle], float]:
         """Ближайшее пересечение луча со сценой."""
+        if not self._accel_built:
+            return self._intersect_fallback(orig, direction)
+
+        d = direction
+        v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
+
+        # h = cross(d, e2)
+        hx = d[1]*e2f[2::3] - d[2]*e2f[1::3]
+        hy = d[2]*e2f[0::3] - d[0]*e2f[2::3]
+        hz = d[0]*e2f[1::3] - d[1]*e2f[0::3]
+
+        # a = dot(e1, h)
+        a = e1f[0::3]*hx + e1f[1::3]*hy + e1f[2::3]*hz
+
+        valid = np.abs(a) > EPS
+        if not np.any(valid):
+            return None, INF
+
+        a_safe = np.where(valid, a, 1.0)
+        f = 1.0 / a_safe
+        f[~valid] = 0.0
+
+        # s = orig - v0
+        sx = orig[0] - v0f[0::3]
+        sy = orig[1] - v0f[1::3]
+        sz = orig[2] - v0f[2::3]
+
+        # u = f * dot(s, h)
+        u = f * (sx*hx + sy*hy + sz*hz)
+        valid &= (u >= 0.0) & (u <= 1.0)
+
+        # q = cross(s, e1)
+        qx = sy*e1f[2::3] - sz*e1f[1::3]
+        qy = sz*e1f[0::3] - sx*e1f[2::3]
+        qz = sx*e1f[1::3] - sy*e1f[0::3]
+
+        # v = f * dot(d, q)
+        v = f * (d[0]*qx + d[1]*qy + d[2]*qz)
+        valid &= (v >= 0.0) & (u + v <= 1.0)
+
+        # t = f * dot(e2, q)
+        t = f * (e2f[0::3]*qx + e2f[1::3]*qy + e2f[2::3]*qz)
+        valid &= (t > EPS)
+
+        if not np.any(valid):
+            return None, INF
+
+        t[~valid] = INF
+        idx = int(np.argmin(t))
+        return self.triangles[idx], t[idx]
+
+    def _intersect_fallback(self, orig: np.ndarray, direction: np.ndarray
+                             ) -> Tuple[Optional[Triangle], float]:
         closest_t   = INF
         closest_tri = None
         for tri in self.triangles:
@@ -159,6 +226,46 @@ class Scene:
     def is_occluded(self, orig: np.ndarray, direction: np.ndarray,
                     max_t: float) -> bool:
         """Проверка видимости (тень)."""
+        if not self._accel_built:
+            return self._is_occluded_fallback(orig, direction, max_t)
+
+        d = direction
+        v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
+
+        hx = d[1]*e2f[2::3] - d[2]*e2f[1::3]
+        hy = d[2]*e2f[0::3] - d[0]*e2f[2::3]
+        hz = d[0]*e2f[1::3] - d[1]*e2f[0::3]
+
+        a = e1f[0::3]*hx + e1f[1::3]*hy + e1f[2::3]*hz
+        valid = np.abs(a) > EPS
+        if not np.any(valid):
+            return False
+
+        a_safe = np.where(valid, a, 1.0)
+        f = 1.0 / a_safe
+        f[~valid] = 0.0
+
+        sx = orig[0] - v0f[0::3]
+        sy = orig[1] - v0f[1::3]
+        sz = orig[2] - v0f[2::3]
+
+        u = f * (sx*hx + sy*hy + sz*hz)
+        valid &= (u >= 0.0) & (u <= 1.0)
+
+        qx = sy*e1f[2::3] - sz*e1f[1::3]
+        qy = sz*e1f[0::3] - sx*e1f[2::3]
+        qz = sx*e1f[1::3] - sy*e1f[0::3]
+
+        v = f * (d[0]*qx + d[1]*qy + d[2]*qz)
+        valid &= (v >= 0.0) & (u + v <= 1.0)
+
+        t = f * (e2f[0::3]*qx + e2f[1::3]*qy + e2f[2::3]*qz)
+        valid &= (t > EPS) & (t < max_t - EPS)
+
+        return bool(np.any(valid))
+
+    def _is_occluded_fallback(self, orig: np.ndarray, direction: np.ndarray,
+                               max_t: float) -> bool:
         for tri in self.triangles:
             t = tri.intersect(orig, direction)
             if t is not None and t < max_t - EPS:
@@ -174,10 +281,10 @@ class Scene:
 
     def light_pdf(self, light: Triangle) -> float:
         """Полный pdf выборки точки на источнике: p_select / area."""
-        for i, l in enumerate(self._lights):
-            if l is light:
-                return self._light_powers[i] / light.area
-        return 0.0
+        idx = self._light_pdf_map.get(id(light))
+        if idx is None:
+            return 0.0
+        return self._light_powers[idx] / light.area
 
 
 # ──────────────────────────────────────────────
@@ -259,7 +366,8 @@ class PathTracer:
                 break
 
             # ── Прямое освещение (NEE) ─────────
-            color += throughput * self._direct_light(hit_point, normal, mat)
+            if not (mat.diffuse < EPS).all():
+                color += throughput * self._direct_light(hit_point, normal, mat)
 
             # ── Выбор события: диффузия или зеркало ──
             kd_lum = luminance(mat.diffuse)
@@ -381,6 +489,7 @@ def render(scene: Scene, camera: Camera,
     output_path: путь к выходному PPM-файлу
     """
     W, H = camera.width, camera.height
+    scene.build_accel()
     tracer = PathTracer(scene, camera, max_depth=max_depth)
 
     hdr_buffer = np.zeros((H, W, 3), dtype=np.float64)
@@ -492,8 +601,8 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
 
     # Источник света на потолке
     scene.add_triangles(quad(
-        [0.25,0.95,0.25],[0.75,0.95,0.25],
-        [0.75,0.95,0.75],[0.25,0.95,0.75], light_mat))
+        [0.35,0.999,0.35],[0.65,0.999,0.35],
+        [0.65,0.999,0.65],[0.35,0.999,0.65], light_mat))
 
     # Блок с поворотом вокруг центра по оси Y
     def rotated_box(x0, y0, z0, x1, y1, z1, mat, angle_deg=0):
@@ -555,7 +664,7 @@ if __name__ == "__main__":
     print(f"Источников:    {len(scene._lights)}")
 
     # ── Параметры рендера ──
-    SPP       = 8   # лучей на пиксель
+    SPP       = 64   # лучей на пиксель
     MAX_DEPTH = 8      # максимальная глубина пути
     GAMMA     = 2.2
     EXPOSURE  = 1.0
