@@ -453,43 +453,6 @@ def _save_ppm(img: np.ndarray, path: str):
 
 
 # ──────────────────────────────────────────────
-# Загрузка OBJ (опционально)
-# ──────────────────────────────────────────────
-
-def load_obj(path: str, material: Material,
-             scale: float = 1.0,
-             offset: np.ndarray = None) -> List[Triangle]:
-    """Минималистичный загрузчик OBJ (только v и f)."""
-    if offset is None:
-        offset = np.zeros(3)
-
-    vertices: List[np.ndarray] = []
-    triangles: List[Triangle]  = []
-
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("v "):
-                parts = line.split()
-                v = np.array([float(parts[1]),
-                               float(parts[2]),
-                               float(parts[3])]) * scale + offset
-                vertices.append(v)
-            elif line.startswith("f "):
-                parts = line.split()[1:]
-                # Поддержка форматов: f v, f v/vt, f v/vt/vn
-                idxs = [int(p.split("/")[0]) - 1 for p in parts]
-                # Триангуляция (fan)
-                for i in range(1, len(idxs) - 1):
-                    tri = Triangle(vertices[idxs[0]].copy(),
-                                   vertices[idxs[i]].copy(),
-                                   vertices[idxs[i+1]].copy(),
-                                   material)
-                    triangles.append(tri)
-    return triangles
-
-
-# ──────────────────────────────────────────────
 # Построение тестовой сцены — Корнельская коробка
 # ──────────────────────────────────────────────
 
@@ -532,23 +495,38 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
         [0.35,0.999,0.35],[0.65,0.999,0.35],
         [0.65,0.999,0.65],[0.35,0.999,0.65], light_mat))
 
-    # Маленький зеркальный «куб» (6 граней × 2 треугольника)
-    def box(x0,y0,z0,x1,y1,z1, mat):
+    # Блок с поворотом вокруг центра по оси Y
+    def rotated_box(x0, y0, z0, x1, y1, z1, mat, angle_deg=0):
+        cx = (x0 + x1) / 2
+        cz = (z0 + z1) / 2
+        a = np.radians(angle_deg)
+        ca, sa = np.cos(a), np.sin(a)
+
+        def rot(v):
+            dx, dz = v[0] - cx, v[2] - cz
+            return [cx + dx*ca - dz*sa, v[1], cz + dx*sa + dz*ca]
+
         tris = []
-        tris += quad([x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1], mat)  # дно
-        tris += quad([x0,y1,z0],[x0,y1,z1],[x1,y1,z1],[x1,y1,z0], mat)  # крыша
-        tris += quad([x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[x0,y0,z1], mat)  # лево
-        tris += quad([x1,y0,z0],[x1,y0,z1],[x1,y1,z1],[x1,y1,z0], mat)  # право
-        tris += quad([x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0], mat)  # перед
-        tris += quad([x0,y0,z1],[x0,y1,z1],[x1,y1,z1],[x1,y0,z1], mat)  # зад
+        tris += quad(rot([x0,y0,z0]), rot([x1,y0,z0]),
+                     rot([x1,y0,z1]), rot([x0,y0,z1]), mat)  # дно
+        tris += quad(rot([x0,y1,z0]), rot([x0,y1,z1]),
+                     rot([x1,y1,z1]), rot([x1,y1,z0]), mat)  # крыша
+        tris += quad(rot([x0,y0,z0]), rot([x0,y0,z1]),
+                     rot([x0,y1,z1]), rot([x0,y1,z0]), mat)  # лево
+        tris += quad(rot([x1,y0,z0]), rot([x1,y1,z0]),
+                     rot([x1,y1,z1]), rot([x1,y0,z1]), mat)  # право
+        tris += quad(rot([x0,y0,z0]), rot([x0,y1,z0]),
+                     rot([x1,y1,z0]), rot([x1,y0,z0]), mat)  # перед
+        tris += quad(rot([x0,y0,z1]), rot([x1,y0,z1]),
+                     rot([x1,y1,z1]), rot([x0,y1,z1]), mat)  # зад
         return tris
 
-    # Высокий зеркальный блок
-    scene.add_triangles(box(0.55, 0.0, 0.42,
-                             0.82, 0.6, 0.70, mirror))
-    # Низкий блок со смешанным материалом
-    scene.add_triangles(box(0.18, 0.0, 0.18,
-                             0.45, 0.3, 0.45, mixed))
+    # Высокий зеркальный блок (повёрнут, чтобы отражать интерьер)
+    scene.add_triangles(rotated_box(0.55, 0.0, 0.42,
+                                    0.82, 0.6, 0.70, mirror, angle_deg=-30))
+    # Низкий блок со смешанным материалом (повёрнут)
+    scene.add_triangles(rotated_box(0.18, 0.0, 0.18,
+                                    0.45, 0.3, 0.45, mixed, angle_deg=20))
 
     # Камера
     camera = Camera(
@@ -577,7 +555,7 @@ if __name__ == "__main__":
     print(f"Источников:    {len(scene._lights)}")
 
     # ── Параметры рендера ──
-    SPP       = 32   # лучей на пиксель
+    SPP       = 8   # лучей на пиксель
     MAX_DEPTH = 8      # максимальная глубина пути
     GAMMA     = 2.2
     EXPOSURE  = 1.0
