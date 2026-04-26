@@ -43,8 +43,7 @@ def compute_normal(tri: Triangle) -> np.ndarray:
 
 def local_to_global(tri: Triangle, x: float, y: float) -> np.ndarray:
     """
-    Перевод локальных координат (x, y) в глобальные.
-    P_T = P0 + (P1-P0)/|P1-P0| * x + (P2-P0)/|P2-P0| * y
+    Перевод локальных координат (x, y) в глобальные
     """
     e1 = normalize(tri.P1 - tri.P0)
     e2 = normalize(tri.P2 - tri.P0)
@@ -53,17 +52,7 @@ def local_to_global(tri: Triangle, x: float, y: float) -> np.ndarray:
 
 def compute_illuminance(P_T: np.ndarray, light: Light, N: np.ndarray) -> np.ndarray:
     """
-    Вычисление «цветной» освещённости E(RGB, P_T) от одного источника.
-    
-    s = P_T - P_L  (вектор от источника к точке, но в формулах используется 
-                     как вектор от точки, поэтому направление на источник = P_L - P_T)
-    
-    Примечание: по формулам задания s = P_T - P_L, 
-    cos α = (s · N) / ||s||, cos θ = (s · O) / ||s||
-    
-    Для корректной физики:
-    - cos α > 0 означает, что свет падает на лицевую сторону поверхности
-    - cos θ > 0 означает, что точка находится в конусе излучения
+    Вычисление освещённости E(RGB, P_T) от одного источника
     """
     s = P_T - light.P_L  # вектор от источника к точке
     R2 = np.dot(s, s)
@@ -73,22 +62,16 @@ def compute_illuminance(P_T: np.ndarray, light: Light, N: np.ndarray) -> np.ndar
         return np.zeros(3)
     
     s_norm = s / R
-    
-    # cos α — угол между направлением света (s) и нормалью поверхности
+
     cos_alpha = np.dot(s_norm, N)
-    
-    # cos θ — угол между направлением на точку и осью источника
+
     cos_theta = np.dot(s_norm, light.O)
     
-    # Если точка не освещается (за поверхностью или вне конуса), 
-    # освещённость = 0
     if cos_alpha <= 0 or cos_theta <= 0:
         return np.zeros(3)
     
-    # I(RGB, s) = I0(RGB) * cos(θ)
     I_s = light.I0 * cos_theta
     
-    # E(RGB, P_T) = I(RGB, s) * cos(α) / R²
     E = I_s * cos_alpha / R2
     
     return E
@@ -97,9 +80,7 @@ def compute_illuminance(P_T: np.ndarray, light: Light, N: np.ndarray) -> np.ndar
 def compute_brdf(N: np.ndarray, v: np.ndarray, s: np.ndarray, 
                  surface: Surface) -> np.ndarray:
     """
-    Вычисление BRDF: f(RGB, P_T, v, s_i) = K(RGB) * (kd + ks * (h·N)^ke)
-    
-    h = (v + s) / ||v + s|| — средний вектор
+    Вычисление BRDF
     """
     s_dir = normalize(s)  # нормализованное направление на источник
     v_norm = normalize(v)
@@ -119,8 +100,7 @@ def compute_luminance(P_T: np.ndarray, lights: List[Light],
                       tri: Triangle, surface: Surface, 
                       V: np.ndarray) -> np.ndarray:
     """
-    Вычисление яркости точки:
-    L(RGB, P_T, v) = (1/π) * Σ E_i(RGB, P_T) * f(RGB, P_T, v, s_i)
+    Вычисление яркости точки
     
     @param P_T: глобальные координаты точки
     @param lights: список источников света

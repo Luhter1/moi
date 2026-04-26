@@ -4,9 +4,9 @@ from scipy import integrate
 
 np.random.seed(42)
 
-a, b = 0, 2 # пределы интегрирования
+a, b = 2, 5 # пределы интегрирования
 f = lambda x: x**2 # подынтегральная функция
-N_list = [10, 100, 1000, 10000, 100000]  # число выборок
+N_list = [100, 1000, 10000, 100000] # число выборок
 
 # Аналитическое значение
 I_true, _ = integrate.quad(f, a, b)
@@ -27,7 +27,6 @@ def std_error(samples):
 
 
 # ПРОСТОЙ МЕТОД МОНТЕ-КАРЛО
-# I = (b-a) * E[f(X)]
 def mc_simple(f, a, b, N):
     X = np.random.uniform(a, b, N)
     samples = (b - a) * f(X)
@@ -45,7 +44,7 @@ for N in N_list:
                  "I_true": round(I_true, 6),
                  "I_est": round(I_est, 6),
                  "Погрешность, %": round(err, 4),
-                 "mu": round(sigma, 6)})
+                 "sigma": round(sigma, 6)})
 df1 = pd.DataFrame(rows)
 print(df1.to_string(index=False))
 
@@ -53,26 +52,21 @@ print(df1.to_string(index=False))
 # СТРАТИФИЦИРОВАННЫЙ МЕТОД МОНТЕ-КАРЛО
 # Разбиваем [a,b] на M страт одинаковой длины
 # В каждой страте берём N//M точек
-# I = Σ_j  (b_j - a_j) * mean(f(X_j))
 def mc_stratified(f, a, b, N, step):
-    """step — ширина страты (1 или 0.5)"""
     strata_edges = np.arange(a, b + step * 0.5, step)
-    M = len(strata_edges) - 1          # число страт
-    n_per = max(1, N // M)             # точек в каждой страте
+    M = len(strata_edges) - 1
+    n_per = max(1, N // M)
 
-    stratum_means = []
+    I_est = 0.0
+    var_est = 0.0
     for j in range(M):
         a_j, b_j = strata_edges[j], strata_edges[j + 1]
+        h_j = b_j - a_j
         X_j = np.random.uniform(a_j, b_j, n_per)
-        stratum_means.append((b_j - a_j) * np.mean(f(X_j)))
+        fX = f(X_j)
+        I_est += h_j * np.mean(fX)
+        var_est += (h_j ** 2) * np.var(fX, ddof=1) / n_per
 
-    I_est = np.sum(stratum_means)
-    var_est = np.sum(
-        [(b - a) / M * np.var(f(np.random.uniform(strata_edges[j],
-                                                   strata_edges[j+1],
-                                                   n_per)), ddof=1) / n_per
-         for j in range(M)]
-    )
     sigma = np.sqrt(var_est)
     return I_est, sigma
 
@@ -88,19 +82,12 @@ for step, label in [(1, "шаг=1"), (0.5, "шаг=0.5")]:
                      "I_true": round(I_true, 6),
                      "I_est": round(I_est, 6),
                      "Погрешность, %": round(err, 4),
-                     "mu": round(sigma, 6)})
+                     "sigma": round(sigma, 6)})
     df = pd.DataFrame(rows)
     print(df.to_string(index=False))
 
 
 # МЕТОД МОНТЕ-КАРЛО С ВЫБОРКОЙ ПО ЗНАЧИМОСТИ
-# I = E[f(X)/p(X)],  X ~ p(x)
-#
-# Три плотности:
-#   p1(x) = 1/(b-a) — равномерная, идентична с простым МК 
-#   p2(x) = x / (b²/2 - a²/2) — линейная, немного похожа на x^2
-#   p3(x) = x² / ((b³-a³)/3)  — квадратичная, совпадает с x^2
-
 C1 = 1.0 / (b - a)
 C2 = 1.0 / (b**2 / 2 - a**2 / 2)
 C3 = 1.0 / ((b**3 - a**3) / 3)
@@ -132,7 +119,7 @@ def p3(x):
 
 def mc_importance(f, sampler, pdf, N):
     X = sampler(N)
-    w = f(X) / pdf(X)          # вес = f/p
+    w = f(X) / pdf(X)
     I_est = np.mean(w)
     sigma = std_error(w)
     return I_est, sigma
@@ -154,7 +141,7 @@ for name, sampler, pdf in configs:
                      "I_true": round(I_true, 6),
                      "I_est": round(I_est, 6),
                      "Погрешность, %": round(err, 4),
-                     "mu": round(sigma, 6)})
+                     "sigma": round(sigma, 6)})
     df = pd.DataFrame(rows)
     print(df.to_string(index=False))
 
@@ -168,22 +155,26 @@ def mis_estimator(f, samplers, pdfs, N, power=1):
     """
     k = len(samplers)
     n_each = N // k
-    total = []
+    I_parts = []
+    all_samples_for_sigma = []
 
     for i, (sampler_i, pdf_i) in enumerate(zip(samplers, pdfs)):
         X_i = sampler_i(n_each)
-        # Вычисляем знаменатель взвешивания
         denom = np.zeros(n_each)
         for pdf_j in pdfs:
             denom += pdf_j(X_i) ** power
         numer = pdf_i(X_i) ** power
-        w_i = numer / denom          # вес MIS
+        w_i = numer / denom
         contrib = w_i * f(X_i) / pdf_i(X_i)
-        total.append(contrib)
+        I_parts.append(np.mean(contrib))
+        all_samples_for_sigma.append(contrib)
 
-    all_samples = np.concatenate(total)
-    I_est = np.mean(all_samples)
-    sigma = std_error(all_samples)
+    I_est = np.mean(I_parts)
+    var_est = 0.0
+    for contrib_arr in all_samples_for_sigma:
+        var_est += np.var(contrib_arr, ddof=1) / n_each
+    sigma = np.sqrt(var_est / (k ** 2))
+
     return I_est, sigma
 
 
@@ -202,7 +193,7 @@ for power, label in [(1, "balance (средняя плотность)"),
                      "I_true": round(I_true, 6),
                      "I_est": round(I_est, 6),
                      "Погрешность, %": round(err, 4),
-                     "mu": round(sigma, 6)})
+                     "sigma": round(sigma, 6)})
     df = pd.DataFrame(rows)
     print(df.to_string(index=False))
 
@@ -214,7 +205,7 @@ def mc_russian_roulette(f, a, b, N, q_frac):
     X = np.random.uniform(a, b, N)
     U = np.random.uniform(0, 1, N)
 
-    survive = U < q_frac                  # маска выживших лучей
+    survive = U < q_frac # маска выживших лучей
     contrib = np.where(survive, (b - a) * f(X) / q_frac, 0.0)
 
     I_est = np.mean(contrib)
@@ -223,7 +214,7 @@ def mc_russian_roulette(f, a, b, N, q_frac):
 
 
 print("\n=== 5. Русская рулетка ===")
-q_values = [0.3, 0.5, 0.7]
+q_values = [0.5, 0.75, 0.95]
 for q in q_values:
     print(f"\n  Вероятность выживания q = {q}")
     rows = []
@@ -234,6 +225,6 @@ for q in q_values:
                      "I_true": round(I_true, 6),
                      "I_est": round(I_est, 6),
                      "Погрешность, %": round(err, 4),
-                     "mu": round(sigma, 6)})
+                     "sigma": round(sigma, 6)})
     df = pd.DataFrame(rows)
     print(df.to_string(index=False))
