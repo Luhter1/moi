@@ -5,16 +5,18 @@ import multiprocessing as mp
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-# ──────────────────────────────────────────────
-# Вспомогательные математические функции
-# ──────────────────────────────────────────────
-
 EPS = 1e-6
 INF = 1e30
 
-
+# Вспомогательные математические функции
 def luminance(c: np.ndarray) -> float:
-    """Воспринимаемая яркость цвета (Rec. 709)."""
+    """
+    Воспринимаемая яркость цвета, перевод линейного rgb в яркость
+    RGB: 
+    - Зелёный = 72%
+    - Красный = 21%
+    - Синий = 7%
+    """    
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 
 def normalize(v: np.ndarray) -> np.ndarray:
@@ -22,11 +24,25 @@ def normalize(v: np.ndarray) -> np.ndarray:
     return v / n if n > EPS else v
 
 def reflect(d: np.ndarray, n: np.ndarray) -> np.ndarray:
-    """Зеркальное отражение вектора d от нормали n."""
+    """Зеркальное отражение вектора d от нормали n"""
     return d - 2.0 * np.dot(d, n) * n
 
 def cosine_sample_hemisphere(normal: np.ndarray) -> np.ndarray:
-    """Выборка по косинусному закону (Ламберт) в полусфере вокруг normal."""
+    """
+    Генерирует случайное направление отражения для диффузных поверхностей согласно закону Ламберта
+
+    Где используется:
+        Луч попал на диффузную поверхность
+        Выбираем новое направление для продолжения пути
+        Направление выбирается с учётом закона Ламберта
+        Больше лучей в направлениях с большим вкладом
+        Меньше шума при том же количестве лучей
+
+    return:
+        Функция возвращает вектор направления, распределённый по косинусному закону:
+        Больше точек вблизи нормали
+        Меньше точек у горизонта
+    """
     u1, u2 = np.random.random(), np.random.random()
     # Метод Мальли
     r = np.sqrt(u1)
@@ -42,13 +58,15 @@ def cosine_sample_hemisphere(normal: np.ndarray) -> np.ndarray:
     return x * t + y * b + z * normal
 
 
-# ──────────────────────────────────────────────
 # Структуры данных сцены
-# ──────────────────────────────────────────────
-
 @dataclass
 class Material:
-    """Материал поверхности."""
+    """
+    Материал поверхности
+    
+    эмиссия — способность поверхности самой излучать свет, а не только отражать падающий свет
+
+    """
     diffuse:  np.ndarray = field(default_factory=lambda: np.array([0.8, 0.8, 0.8]))
     specular: np.ndarray = field(default_factory=lambda: np.zeros(3))
     emission: np.ndarray = field(default_factory=lambda: np.zeros(3))
@@ -69,7 +87,14 @@ class Material:
 
 @dataclass
 class Triangle:
-    """Один треугольник сетки."""
+    """
+    Один треугольник сетки
+
+    - v0, v1, v2 — координаты вершин
+    - e1, e2 — рёбра треугольника
+    - normal — нормаль треугольника
+    - area — площадь треугольника
+    """
     v0: np.ndarray
     v1: np.ndarray
     v2: np.ndarray
@@ -91,7 +116,27 @@ class Triangle:
 
     def intersect(self, ray_orig: np.ndarray, ray_dir: np.ndarray
                   ) -> Optional[float]:
-        """Алгоритм Мёллера–Трумбора. Возвращает t или None."""
+        """
+        Алгоритм Мёллера–Трумбора. Возвращает t или None.
+
+        Быстрый алгоритм проверки пересечения луча с треугольником без предварительного вычисления нормали.
+
+        h = d x e2
+        a = e1 * h
+        if |a| < EPS: луч параллелен треугольнику (нет пересечения)
+
+        f = 1/a
+        s = o - v0
+        u = f * (s * h)
+        if u < 0 или u > 1: точка вне треугольника
+
+        q = s x e1
+        v = f * (d * q)
+        if v < 0 или u + v > 1: точка вне треугольника
+
+        t = f * (e2 * q)
+        if t > EPS: есть пересечение на расстоянии t
+        """
         h  = np.cross(ray_dir, self.e2)
         a  = np.dot(self.e1, h)
         if abs(a) < EPS:
@@ -109,10 +154,7 @@ class Triangle:
         return t if t > EPS else None
 
 
-# ──────────────────────────────────────────────
 # Сцена
-# ──────────────────────────────────────────────
-
 class Scene:
     def __init__(self):
         self.triangles: List[Triangle] = []
@@ -161,9 +203,6 @@ class Scene:
     def intersect(self, orig: np.ndarray, direction: np.ndarray
                   ) -> Tuple[Optional[Triangle], float]:
         """Ближайшее пересечение луча со сценой."""
-        if not self._accel_built:
-            return self._intersect_fallback(orig, direction)
-
         d = direction
         v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
 
@@ -212,23 +251,9 @@ class Scene:
         idx = int(np.argmin(t))
         return self.triangles[idx], t[idx]
 
-    def _intersect_fallback(self, orig: np.ndarray, direction: np.ndarray
-                             ) -> Tuple[Optional[Triangle], float]:
-        closest_t   = INF
-        closest_tri = None
-        for tri in self.triangles:
-            t = tri.intersect(orig, direction)
-            if t is not None and t < closest_t:
-                closest_t   = t
-                closest_tri = tri
-        return closest_tri, closest_t
-
     def is_occluded(self, orig: np.ndarray, direction: np.ndarray,
                     max_t: float) -> bool:
         """Проверка видимости (тень)."""
-        if not self._accel_built:
-            return self._is_occluded_fallback(orig, direction, max_t)
-
         d = direction
         v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
 
@@ -264,15 +289,7 @@ class Scene:
 
         return bool(np.any(valid))
 
-    def _is_occluded_fallback(self, orig: np.ndarray, direction: np.ndarray,
-                               max_t: float) -> bool:
-        for tri in self.triangles:
-            t = tri.intersect(orig, direction)
-            if t is not None and t < max_t - EPS:
-                return True
-        return False
-
-    # ── Выборка источника ──────────────────────
+    # Выборка источника
     def sample_light(self) -> Optional[Triangle]:
         if not self._lights:
             return None
@@ -292,6 +309,13 @@ class Scene:
 # ──────────────────────────────────────────────
 
 class Camera:
+    '''
+    - position — положение камеры
+    - look_at — точка, куда смотрит камера
+    - up — вектор "верха"
+    - fov_deg — поле зрения в градусах
+    - width, height — разрешение изображения
+    '''
     def __init__(self, position: np.ndarray, look_at: np.ndarray,
                  up: np.ndarray, fov_deg: float,
                  width: int, height: int):
@@ -299,14 +323,14 @@ class Camera:
         self.width    = width
         self.height   = height
 
-        fwd = normalize(look_at - position)
-        rgt = normalize(np.cross(fwd, up))
-        u   = np.cross(rgt, fwd)
+        fwd = normalize(look_at - position)     # Ось Z (направление)
+        rgt = normalize(np.cross(fwd, up))      # Ось X (вправо)
+        u   = np.cross(rgt, fwd)                # Ось Y (вверх)
 
         half_h = np.tan(np.radians(fov_deg / 2.0))
         half_w = half_h * width / height
 
-        self.lower_left = fwd - half_w * rgt - half_h * u
+        self.lower_left = fwd - half_w * rgt - half_h * u # Нижний левый угол экрана
         self.horiz      = 2.0 * half_w * rgt
         self.vert       = 2.0 * half_h * u
         self.right      = rgt
@@ -315,10 +339,10 @@ class Camera:
     def get_ray(self, px: int, py: int
                 ) -> Tuple[np.ndarray, np.ndarray]:
         """Возвращает (origin, direction) с антиалиасингом."""
-        # Случайное смещение внутри пикселя
+        # Случайное смещение внутри пикселя, так как дискретизация пикселей вызывает ступенчатые края
         sx = (px + np.random.random()) / self.width
         sy = (py + np.random.random()) / self.height
-        direction = normalize(self.lower_left + sx * self.horiz + sy * self.vert)
+        direction = normalize(self.lower_left + sx * self.horiz + sy * self.vert) # Направление луча для пикселя
         return self.position.copy(), direction
 
 
@@ -355,12 +379,13 @@ class PathTracer:
             if np.dot(normal, direction) > 0:
                 normal = -normal
 
-            # ── Эмиссия (источник света) ────────
+            # Эмиссия (источник света)
+            # путь завершается для упрощения
             if mat.is_emitter:
                 color += throughput * mat.emission
                 break
 
-            # ── Русская рулетка ────────────────
+            # Русская рулетка
             total_refl = mat.diffuse + mat.specular
             p_continue = min(max(total_refl[0], total_refl[1], total_refl[2]), 0.95)
             if depth >= self.rr_start_depth:
@@ -368,7 +393,7 @@ class PathTracer:
                     break
                 throughput = throughput / p_continue
 
-            # ── Выбор типа отражения ───────────
+            # Выбор типа отражения
             diff_weight = max(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2])
             spec_weight = max(mat.specular[0], mat.specular[1], mat.specular[2])
             total_weight = diff_weight + spec_weight
@@ -379,14 +404,14 @@ class PathTracer:
             p_diff = diff_weight / total_weight
 
             if np.random.random() < p_diff:
-                # ── Диффузное отражение ──────────
+                # Диффузное отражение
                 # NEE: прямое освещение
                 color += throughput * self._direct_light(hit_point, normal, mat)
                 # Продолжаем путь
                 new_dir = cosine_sample_hemisphere(normal)
                 throughput = throughput * mat.diffuse
             else:
-                # ── Зеркальное отражение ─────────
+                # Зеркальное отражение
                 new_dir = reflect(direction, normal)
                 throughput = throughput * mat.specular
 
@@ -395,7 +420,9 @@ class PathTracer:
 
         return color
 
-    # ── Прямое освещение ──────────────────────
+    # Прямое освещение
+    # Вместо того чтобы надеяться на случайное попадание в источник, 
+    # мы выпускаем дополнительный луч прямо к случайной точке на источнике света
     def _direct_light(self, point: np.ndarray, normal: np.ndarray,
                       mat: Material) -> np.ndarray:
         """Выборка прямого освещения через один случайный источник."""
@@ -403,6 +430,7 @@ class PathTracer:
         if light is None:
             return np.zeros(3)
 
+        # выбираем случайную точку на источнике
         light_point  = light.sample_point()
         to_light     = light_point - point
         dist         = np.linalg.norm(to_light)
@@ -429,13 +457,10 @@ class PathTracer:
         geom = cos_surf * cos_light / (dist * dist)
         # Ламбертовская BRDF: kd/π
         # Вклад: Le * (kd/π) * geom / pdf_light
+        # делим на pdf, чтобы компенсировать то, что яркие берем часто, а неяркие редко
         contrib = light.material.emission * (mat.diffuse / np.pi) * geom / pdf_light
         return contrib
 
-
-# ──────────────────────────────────────────────
-# Многопроцессорный рендер
-# ──────────────────────────────────────────────
 
 # Глобальные переменные воркеров
 _w_tracer: Optional[PathTracer] = None
@@ -522,9 +547,9 @@ def render(scene: Scene, camera: Camera,
 
     print(f"\nГотово за {time.time()-start_time:.1f} с")
 
-    # ── Тональная компрессия ──────────────────
+    # Тональная компрессия
     img = hdr_buffer * exposure
-    # Нормировка по средней яркости → 0.5
+    # Нормировка по средней яркости -> 0.5
     lum = 0.2126 * img[:,:,0] + 0.7152 * img[:,:,1] + 0.0722 * img[:,:,2]
     # Среднее по ненулевым пикселям (исключаем фон)
     nonzero = lum[lum > EPS]
@@ -539,7 +564,7 @@ def render(scene: Scene, camera: Camera,
     # Перевод в 0-255
     img_uint8 = (img_gamma * 255.0).astype(np.uint8)
 
-    # ── Запись PPM ───────────────────────────
+    # Запись PPM
     _save_ppm(img_uint8, output_path)
     print(f"Изображение сохранено: {output_path}")
 
@@ -554,10 +579,7 @@ def _save_ppm(img: np.ndarray, path: str):
         f.write(img.tobytes())
 
 
-# ──────────────────────────────────────────────
 # Построение тестовой сцены — Корнельская коробка
-# ──────────────────────────────────────────────
-
 def build_cornell_box() -> Tuple[Scene, Camera]:
     scene = Scene()
 
@@ -643,9 +665,6 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
     return scene, camera
 
 
-# ──────────────────────────────────────────────
-# Точка входа
-# ──────────────────────────────────────────────
 
 if __name__ == "__main__":
     np.random.seed(42)
@@ -656,21 +675,17 @@ if __name__ == "__main__":
     print(f"Треугольников: {len(scene.triangles)}")
     print(f"Источников:    {len(scene._lights)}")
 
-    # ── Параметры рендера ──
+    # Параметры рендера
     SPP       = 64   # лучей на пиксель
     MAX_DEPTH = 8      # максимальная глубина пути
     GAMMA     = 2.2
     EXPOSURE  = 1.0
     OUTPUT    = "cornell_box.ppm"
 
-    print(f"Разрешение: {camera.width}×{camera.height}, SPP={SPP}")
+    print(f"Разрешение: {camera.width}x{camera.height}, SPP={SPP}")
     hdr = render(scene, camera,
                  spp=SPP,
                  max_depth=MAX_DEPTH,
                  gamma=GAMMA,
                  exposure=EXPOSURE,
                  output_path=OUTPUT)
-
-    # Опционально: сохранить HDR в бинарный формат
-    hdr.astype(np.float32).tofile(OUTPUT.replace(".ppm", ".hdr_raw"))
-    print("HDR-данные сохранены (float32 raw).")
