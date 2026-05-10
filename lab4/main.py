@@ -363,6 +363,8 @@ class PathTracer:
     def trace(self, orig: np.ndarray, direction: np.ndarray) -> np.ndarray:
         color      = np.zeros(3)
         throughput = np.ones(3)
+        nee_value = np.zeros(3)  # Вклад NEE после последнего диффузного отражения
+        has_nee = False  # есть ли несохраненный NEE
 
         for depth in range(self.max_depth):
 
@@ -380,8 +382,9 @@ class PathTracer:
                 normal = -normal
 
             # Эмиссия (источник света)
-            # путь завершается для упрощения
             if mat.is_emitter:
+                if has_nee:
+                    color -= nee_value
                 color += throughput * mat.emission
                 break
 
@@ -406,14 +409,17 @@ class PathTracer:
             if np.random.random() < p_diff:
                 # Диффузное отражение
                 # NEE: прямое освещение
-                color += throughput * self._direct_light(hit_point, normal, mat)
+                nee_value = throughput * self._direct_light(hit_point, normal, mat)
+                color += nee_value
+                has_nee = True
                 # Продолжаем путь
                 new_dir = cosine_sample_hemisphere(normal)
                 throughput = throughput * mat.diffuse
             else:
-                # Зеркальное отражение
                 new_dir = reflect(direction, normal)
                 throughput = throughput * mat.specular
+                has_nee = False
+                nee_value = np.zeros(3)
 
             orig      = hit_point + normal * EPS
             direction = new_dir
@@ -442,7 +448,7 @@ class PathTracer:
         cos_light = np.dot(-light.normal, to_light_n)
 
         if cos_surf <= 0 or cos_light <= 0:
-            return np.zeros(3)
+            return np.zeros(3) # нет освещения
 
         # Проверка тени
         if self.scene.is_occluded(point + normal * EPS, to_light_n, dist):
