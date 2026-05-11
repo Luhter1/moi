@@ -158,11 +158,10 @@ class Triangle:
 class Scene:
     def __init__(self):
         self.triangles: List[Triangle] = []
-        self._lights:   List[Triangle] = []        # кэш источников
+        self._lights:   List[Triangle] = [] # кэш источников
         self._light_powers: np.ndarray = np.array([])
         self._light_pdf_map: dict = {}
         self._accel_built = False
-        # Flat arrays: interleaved xyz, shape (3*N,)
         self._v0f: np.ndarray = np.array([])
         self._e1f: np.ndarray = np.array([])
         self._e2f: np.ndarray = np.array([])
@@ -199,7 +198,6 @@ class Scene:
         self._e2f = np.array([t.e2 for t in self.triangles]).ravel().astype(np.float64)
         self._accel_built = True
 
-    # ── Пересечение (векторизованное, flat arrays) ──
     def intersect(self, orig: np.ndarray, direction: np.ndarray
                   ) -> Tuple[Optional[Triangle], float]:
         """Ближайшее пересечение луча со сценой."""
@@ -253,7 +251,7 @@ class Scene:
 
     def is_occluded(self, orig: np.ndarray, direction: np.ndarray,
                     max_t: float) -> bool:
-        """Проверка видимости (тень)."""
+        """Проверка видимости"""
         d = direction
         v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
 
@@ -297,17 +295,14 @@ class Scene:
         return self._lights[idx]
 
     def light_pdf(self, light: Triangle) -> float:
-        """Полный pdf выборки точки на источнике: p_select / area."""
+        """Полный pdf выборки точки на источнике: p_select / area"""
         idx = self._light_pdf_map.get(id(light))
         if idx is None:
             return 0.0
         return self._light_powers[idx] / light.area
 
 
-# ──────────────────────────────────────────────
 # Камера
-# ──────────────────────────────────────────────
-
 class Camera:
     '''
     - position — положение камеры
@@ -338,7 +333,7 @@ class Camera:
 
     def get_ray(self, px: int, py: int
                 ) -> Tuple[np.ndarray, np.ndarray]:
-        """Возвращает (origin, direction) с антиалиасингом."""
+        """Возвращает (origin, direction) с антиалиасингом"""
         # Случайное смещение внутри пикселя, так как дискретизация пикселей вызывает ступенчатые края
         sx = (px + np.random.random()) / self.width
         sy = (py + np.random.random()) / self.height
@@ -346,10 +341,7 @@ class Camera:
         return self.position.copy(), direction
 
 
-# ──────────────────────────────────────────────
 # Трассировщик путей
-# ──────────────────────────────────────────────
-
 class PathTracer:
     def __init__(self, scene: Scene, camera: Camera,
                  max_depth: int = 8,
@@ -359,7 +351,7 @@ class PathTracer:
         self.max_depth     = max_depth
         self.rr_start_depth = rr_start_depth
 
-    # ── Одна выборка пути ──────────────────────
+    # Одна выборка пути
     def trace(self, orig: np.ndarray, direction: np.ndarray) -> np.ndarray:
         color      = np.zeros(3)
         throughput = np.ones(3)
@@ -431,7 +423,7 @@ class PathTracer:
     # мы выпускаем дополнительный луч прямо к случайной точке на источнике света
     def _direct_light(self, point: np.ndarray, normal: np.ndarray,
                       mat: Material) -> np.ndarray:
-        """Выборка прямого освещения через один случайный источник."""
+        """Выборка прямого освещения через один случайный источник"""
         light = self.scene.sample_light()
         if light is None:
             return np.zeros(3)
@@ -461,8 +453,8 @@ class PathTracer:
 
         # Геометрический терм
         geom = cos_surf * cos_light / (dist * dist)
-        # Ламбертовская BRDF: kd/π
-        # Вклад: Le * (kd/π) * geom / pdf_light
+        # Ламбертовская BRDF: kd/pi
+        # Вклад: Le * (kd/pi) * geom / pdf_light
         # делим на pdf, чтобы компенсировать то, что яркие берем часто, а неяркие редко
         contrib = light.material.emission * (mat.diffuse / np.pi) * geom / pdf_light
         return contrib
@@ -482,7 +474,7 @@ def _worker_init(tracer: PathTracer, camera: Camera):
 
 
 def _render_row(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
-    """Рендерит одну строку изображения."""
+    """Рендерит одну строку изображения"""
     py, spp = args
     W = _w_camera.width
     row = np.zeros((W, 3))
@@ -502,14 +494,12 @@ def render(scene: Scene, camera: Camera,
            exposure: float = 1.0,
            output_path: str = "output.ppm") -> np.ndarray:
     """
-    Основная функция рендера.
+    Основная функция рендера
 
-    Parameters
-    ----------
-    spp        : число лучей на пиксель
-    max_depth  : максимальная глубина пути
-    gamma      : параметр гамма-коррекции
-    exposure   : коэффициент экспозиции (масштаб яркости перед тоном)
+    spp: число лучей на пиксель
+    max_depth: максимальная глубина пути
+    gamma: параметр гамма-коррекции
+    exposure: коэффициент экспозиции (масштаб яркости перед тоном)
     output_path: путь к выходному PPM-файлу
     """
     W, H = camera.width, camera.height
@@ -555,7 +545,6 @@ def render(scene: Scene, camera: Camera,
 
     # Тональная компрессия
     img = hdr_buffer * exposure
-    # Нормировка по средней яркости -> 0.5
     lum = 0.2126 * img[:,:,0] + 0.7152 * img[:,:,1] + 0.0722 * img[:,:,2]
     # Среднее по ненулевым пикселям (исключаем фон)
     nonzero = lum[lum > EPS]
@@ -585,7 +574,7 @@ def _save_ppm(img: np.ndarray, path: str):
         f.write(img.tobytes())
 
 
-# Построение тестовой сцены — Корнельская коробка
+# Построение тестовой сцены - Корнельская коробка
 def build_cornell_box() -> Tuple[Scene, Camera]:
     scene = Scene()
 
@@ -600,7 +589,7 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
     light_mat = Material(emission=np.array([8.0, 8.0, 6.5]))
 
     def quad(v0, v1, v2, v3, mat):
-        """Квад → два треугольника."""
+        """Квад == два треугольника"""
         return [Triangle(np.array(v0), np.array(v1), np.array(v2), mat),
                 Triangle(np.array(v0), np.array(v2), np.array(v3), mat)]
 
@@ -625,7 +614,6 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
         [0.35,0.999,0.35],[0.65,0.999,0.35],
         [0.65,0.999,0.65],[0.35,0.999,0.65], light_mat))
 
-    # Блок с поворотом вокруг центра по оси Y
     def rotated_box(x0, y0, z0, x1, y1, z1, mat, angle_deg=0):
         cx = (x0 + x1) / 2
         cz = (z0 + z1) / 2
@@ -651,10 +639,8 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
                      rot([x1,y1,z1]), rot([x0,y1,z1]), mat)  # зад
         return tris
 
-    # Высокий зеркальный блок (повёрнут, чтобы отражать интерьер)
     scene.add_triangles(rotated_box(0.55, 0.0, 0.42,
                                     0.82, 0.6, 0.70, mirror, angle_deg=-30))
-    # Низкий блок со смешанным материалом (повёрнут)
     scene.add_triangles(rotated_box(0.18, 0.0, 0.18,
                                     0.45, 0.3, 0.45, mixed, angle_deg=20))
 
