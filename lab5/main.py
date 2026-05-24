@@ -2,7 +2,7 @@
 Lab 5: Joint Bilateral Filter для подавления шума в Path Tracing.
 
 Архитектура:
-1. Модифицированный рендерер — трассировка путей с сохранением G-буферов
+1. Рендерер из lab4 (без изменений) — трассировка путей с G-буферами
    (direct_light, indirect_light, depth_map, normal_map, object_index).
 2. Joint Bilateral Filter — фильтрация только indirect_light с использованием
    G-буферов в качестве весов, предотвращающих размытие границ.
@@ -26,28 +26,25 @@ INF = 1e30
 
 
 # ---------------------------------------------------------------------------
-# Вспомогательные математические функции
+# Вспомогательные математические функции (из lab4)
 # ---------------------------------------------------------------------------
 
 def luminance(c: np.ndarray) -> float:
-    """Воспринимаемая яркость цвета (линейный RGB -> яркость)."""
+    """Воспринимаемая яркость цвета, перевод линейного rgb в яркость"""
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
-
 
 def normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     return v / n if n > EPS else v
 
-
 def reflect(d: np.ndarray, n: np.ndarray) -> np.ndarray:
-    """Зеркальное отражение вектора d от нормали n."""
+    """Зеркальное отражение вектора d от нормали n"""
     return d - 2.0 * np.dot(d, n) * n
-
 
 def cosine_sample_hemisphere(normal: np.ndarray) -> np.ndarray:
     """
     Генерирует случайное направление отражения для диффузных поверхностей
-    согласно закону Ламберта (косинусное распределение).
+    согласно закону Ламберта
     """
     u1, u2 = np.random.random(), np.random.random()
     r = np.sqrt(u1)
@@ -63,21 +60,27 @@ def cosine_sample_hemisphere(normal: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Структуры данных сцены
+# Структуры данных сцены (из lab4)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Material:
-    diffuse: np.ndarray = field(default_factory=lambda: np.array([0.8, 0.8, 0.8]))
+    """
+    Материал поверхности
+
+    эмиссия — способность поверхности самой излучать свет, а не только отражать падающий свет
+    """
+    diffuse:  np.ndarray = field(default_factory=lambda: np.array([0.8, 0.8, 0.8]))
     specular: np.ndarray = field(default_factory=lambda: np.zeros(3))
     emission: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def __post_init__(self):
+        # Гарантируем сохранение энергии: kd + ks <= 1 покомпонентно
         total = self.diffuse + self.specular
         mask = total > 1.0
         if np.any(mask):
             scale = np.where(mask, 1.0 / total, 1.0)
-            self.diffuse = self.diffuse * scale
+            self.diffuse  = self.diffuse  * scale
             self.specular = self.specular * scale
 
     @property
@@ -87,20 +90,28 @@ class Material:
 
 @dataclass
 class Triangle:
+    """
+    Один треугольник сетки
+
+    - v0, v1, v2 — координаты вершин
+    - e1, e2 — рёбра треугольника
+    - normal — нормаль треугольника
+    - area — площадь треугольника
+    """
     v0: np.ndarray
     v1: np.ndarray
     v2: np.ndarray
     material: Material
-    tri_index: int = 0  # Уникальный индекс треугольника (для object_index)
 
     def __post_init__(self):
         self.e1 = self.v1 - self.v0
         self.e2 = self.v2 - self.v0
-        n = np.cross(self.e1, self.e2)
-        self.area = 0.5 * np.linalg.norm(n)
+        n  = np.cross(self.e1, self.e2)
+        self.area   = 0.5 * np.linalg.norm(n)
         self.normal = normalize(n)
 
     def sample_point(self) -> np.ndarray:
+        """Случайная точка на треугольнике (равномерно)."""
         u1, u2 = np.random.random(), np.random.random()
         if u1 + u2 > 1.0:
             u1, u2 = 1.0 - u1, 1.0 - u2
@@ -108,31 +119,34 @@ class Triangle:
 
     def intersect(self, ray_orig: np.ndarray, ray_dir: np.ndarray
                   ) -> Optional[float]:
-        h = np.cross(ray_dir, self.e2)
-        a = np.dot(self.e1, h)
+        """
+        Алгоритм Мёллера–Трумбора. Возвращает t или None.
+        """
+        h  = np.cross(ray_dir, self.e2)
+        a  = np.dot(self.e1, h)
         if abs(a) < EPS:
             return None
-        f = 1.0 / a
-        s = ray_orig - self.v0
-        u = f * np.dot(s, h)
+        f  = 1.0 / a
+        s  = ray_orig - self.v0
+        u  = f * np.dot(s, h)
         if not (0.0 <= u <= 1.0):
             return None
-        q = np.cross(s, self.e1)
-        v = f * np.dot(ray_dir, q)
+        q  = np.cross(s, self.e1)
+        v  = f * np.dot(ray_dir, q)
         if v < 0.0 or u + v > 1.0:
             return None
-        t = f * np.dot(self.e2, q)
+        t  = f * np.dot(self.e2, q)
         return t if t > EPS else None
 
 
 # ---------------------------------------------------------------------------
-# Сцена
+# Сцена (из lab4)
 # ---------------------------------------------------------------------------
 
 class Scene:
     def __init__(self):
         self.triangles: List[Triangle] = []
-        self._lights: List[Triangle] = []
+        self._lights:   List[Triangle] = []
         self._light_powers: np.ndarray = np.array([])
         self._light_pdf_map: dict = {}
         self._accel_built = False
@@ -140,6 +154,8 @@ class Scene:
         self._e1f: np.ndarray = np.array([])
         self._e2f: np.ndarray = np.array([])
         self._n_tri: int = 0
+        # Маппинг id(triangle) -> индекс в self.triangles (для object_index)
+        self._tri_id_to_idx: dict = {}
 
     def add_triangle(self, tri: Triangle):
         self.triangles.append(tri)
@@ -161,6 +177,7 @@ class Scene:
         self._light_pdf_map = {id(t): i for i, t in enumerate(self._lights)}
 
     def build_accel(self):
+        """Создать flat numpy-массивы для векторизованных пересечений."""
         self._rebuild_light_cache()
         N = len(self.triangles)
         self._n_tri = N
@@ -170,17 +187,23 @@ class Scene:
         self._e1f = np.array([t.e1 for t in self.triangles]).ravel().astype(np.float64)
         self._e2f = np.array([t.e2 for t in self.triangles]).ravel().astype(np.float64)
         self._accel_built = True
+        # Строим маппинг для object_index
+        self._tri_id_to_idx = {id(t): i for i, t in enumerate(self.triangles)}
 
     def intersect(self, orig: np.ndarray, direction: np.ndarray
                   ) -> Tuple[Optional[Triangle], float]:
+        """Ближайшее пересечение луча со сценой."""
         d = direction
         v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
 
-        hx = d[1] * e2f[2::3] - d[2] * e2f[1::3]
-        hy = d[2] * e2f[0::3] - d[0] * e2f[2::3]
-        hz = d[0] * e2f[1::3] - d[1] * e2f[0::3]
+        # h = cross(d, e2)
+        hx = d[1]*e2f[2::3] - d[2]*e2f[1::3]
+        hy = d[2]*e2f[0::3] - d[0]*e2f[2::3]
+        hz = d[0]*e2f[1::3] - d[1]*e2f[0::3]
 
-        a = e1f[0::3] * hx + e1f[1::3] * hy + e1f[2::3] * hz
+        # a = dot(e1, h)
+        a = e1f[0::3]*hx + e1f[1::3]*hy + e1f[2::3]*hz
+
         valid = np.abs(a) > EPS
         if not np.any(valid):
             return None, INF
@@ -189,21 +212,26 @@ class Scene:
         f = 1.0 / a_safe
         f[~valid] = 0.0
 
+        # s = orig - v0
         sx = orig[0] - v0f[0::3]
         sy = orig[1] - v0f[1::3]
         sz = orig[2] - v0f[2::3]
 
-        u = f * (sx * hx + sy * hy + sz * hz)
+        # u = f * dot(s, h)
+        u = f * (sx*hx + sy*hy + sz*hz)
         valid &= (u >= 0.0) & (u <= 1.0)
 
-        qx = sy * e1f[2::3] - sz * e1f[1::3]
-        qy = sz * e1f[0::3] - sx * e1f[2::3]
-        qz = sx * e1f[1::3] - sy * e1f[0::3]
+        # q = cross(s, e1)
+        qx = sy*e1f[2::3] - sz*e1f[1::3]
+        qy = sz*e1f[0::3] - sx*e1f[2::3]
+        qz = sx*e1f[1::3] - sy*e1f[0::3]
 
-        v = f * (d[0] * qx + d[1] * qy + d[2] * qz)
+        # v = f * dot(d, q)
+        v = f * (d[0]*qx + d[1]*qy + d[2]*qz)
         valid &= (v >= 0.0) & (u + v <= 1.0)
 
-        t = f * (e2f[0::3] * qx + e1f[1::3] * qy + e2f[2::3] * qz)
+        # t = f * dot(e2, q)
+        t = f * (e2f[0::3]*qx + e2f[1::3]*qy + e2f[2::3]*qz)
         valid &= (t > EPS)
 
         if not np.any(valid):
@@ -215,14 +243,15 @@ class Scene:
 
     def is_occluded(self, orig: np.ndarray, direction: np.ndarray,
                     max_t: float) -> bool:
+        """Проверка видимости"""
         d = direction
         v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
 
-        hx = d[1] * e2f[2::3] - d[2] * e2f[1::3]
-        hy = d[2] * e2f[0::3] - d[0] * e2f[2::3]
-        hz = d[0] * e2f[1::3] - d[1] * e2f[0::3]
+        hx = d[1]*e2f[2::3] - d[2]*e2f[1::3]
+        hy = d[2]*e2f[0::3] - d[0]*e2f[2::3]
+        hz = d[0]*e2f[1::3] - d[1]*e2f[0::3]
 
-        a = e1f[0::3] * hx + e1f[1::3] * hy + e1f[2::3] * hz
+        a = e1f[0::3]*hx + e1f[1::3]*hy + e1f[2::3]*hz
         valid = np.abs(a) > EPS
         if not np.any(valid):
             return False
@@ -235,21 +264,22 @@ class Scene:
         sy = orig[1] - v0f[1::3]
         sz = orig[2] - v0f[2::3]
 
-        u = f * (sx * hx + sy * hy + sz * hz)
+        u = f * (sx*hx + sy*hy + sz*hz)
         valid &= (u >= 0.0) & (u <= 1.0)
 
-        qx = sy * e1f[2::3] - sz * e1f[1::3]
-        qy = sz * e1f[0::3] - sx * e1f[2::3]
-        qz = sx * e1f[1::3] - sy * e1f[0::3]
+        qx = sy*e1f[2::3] - sz*e1f[1::3]
+        qy = sz*e1f[0::3] - sx*e1f[2::3]
+        qz = sx*e1f[1::3] - sy*e1f[0::3]
 
-        v = f * (d[0] * qx + d[1] * qy + d[2] * qz)
+        v = f * (d[0]*qx + d[1]*qy + d[2]*qz)
         valid &= (v >= 0.0) & (u + v <= 1.0)
 
-        t = f * (e2f[0::3] * qx + e1f[1::3] * qy + e2f[2::3] * qz)
+        t = f * (e2f[0::3]*qx + e2f[1::3]*qy + e2f[2::3]*qz)
         valid &= (t > EPS) & (t < max_t - EPS)
 
         return bool(np.any(valid))
 
+    # Выборка источника
     def sample_light(self) -> Optional[Triangle]:
         if not self._lights:
             return None
@@ -257,39 +287,52 @@ class Scene:
         return self._lights[idx]
 
     def light_pdf(self, light: Triangle) -> float:
+        """Полный pdf выборки точки на источнике: p_select / area"""
         idx = self._light_pdf_map.get(id(light))
         if idx is None:
             return 0.0
         return self._light_powers[idx] / light.area
 
+    def get_tri_index(self, tri: Triangle) -> int:
+        """Возвращает индекс треугольника в сцене для object_index."""
+        return self._tri_id_to_idx.get(id(tri), -1)
+
 
 # ---------------------------------------------------------------------------
-# Камера
+# Камера (из lab4)
 # ---------------------------------------------------------------------------
 
 class Camera:
+    '''
+    - position — положение камеры
+    - look_at — точка, куда смотрит камера
+    - up — вектор "верха"
+    - fov_deg — поле зрения в градусах
+    - width, height — разрешение изображения
+    '''
     def __init__(self, position: np.ndarray, look_at: np.ndarray,
                  up: np.ndarray, fov_deg: float,
                  width: int, height: int):
         self.position = position
-        self.width = width
-        self.height = height
+        self.width    = width
+        self.height   = height
 
         fwd = normalize(look_at - position)
         rgt = normalize(np.cross(fwd, up))
-        u = np.cross(rgt, fwd)
+        u   = np.cross(rgt, fwd)
 
         half_h = np.tan(np.radians(fov_deg / 2.0))
         half_w = half_h * width / height
 
         self.lower_left = fwd - half_w * rgt - half_h * u
-        self.horiz = 2.0 * half_w * rgt
-        self.vert = 2.0 * half_h * u
-        self.right = rgt
-        self.up = u
+        self.horiz      = 2.0 * half_w * rgt
+        self.vert       = 2.0 * half_h * u
+        self.right      = rgt
+        self.up         = u
 
     def get_ray(self, px: int, py: int
                 ) -> Tuple[np.ndarray, np.ndarray]:
+        """Возвращает (origin, direction) с антиалиасингом"""
         sx = (px + np.random.random()) / self.width
         sy = (py + np.random.random()) / self.height
         direction = normalize(self.lower_left + sx * self.horiz + sy * self.vert)
@@ -297,60 +340,59 @@ class Camera:
 
 
 # ---------------------------------------------------------------------------
-# Трассировщик путей с G-буферами
+# Трассировщик путей (из lab4, модифицирован для разделения direct/indirect)
 # ---------------------------------------------------------------------------
 
-class PathTracerGBuf:
-    """
-    Модифицированный трассировщик путей, который разделяет вклад на:
-    - direct_light: вклад от NEE (прямое освещение через явную выборку источника)
-    - indirect_light: всё остальное (эмиссия от случайных попаданий, specular, и т.д.)
-    """
-
+class PathTracer:
     def __init__(self, scene: Scene, camera: Camera,
                  max_depth: int = 8,
                  rr_start_depth: int = 3):
-        self.scene = scene
-        self.camera = camera
-        self.max_depth = max_depth
+        self.scene         = scene
+        self.camera        = camera
+        self.max_depth     = max_depth
         self.rr_start_depth = rr_start_depth
 
+    # Одна выборка пути — возвращает (total_color, direct_color, indirect_color)
     def trace(self, orig: np.ndarray, direction: np.ndarray
-              ) -> Tuple[np.ndarray, np.ndarray]:
+              ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Трассировка одного пути. Возвращает (direct, indirect) вклады.
+        Трассировка одного пути.
+        Возвращает (total, direct, indirect).
 
-        Разделение:
-        - direct: результат _direct_light() (NEE вклад)
-        - indirect: эмиссия при попадании на источник через случайныйbounce,
-                    specular отражения, и прочие некомпоненты прямого света
+        direct — вклад от NEE (прямое освещение через явную выборку источника).
+        indirect — всё остальное (эмиссия от случайных попаданий, specular, и т.д.).
+        total = direct + indirect.
         """
-        direct_color = np.zeros(3)
-        indirect_color = np.zeros(3)
+        color      = np.zeros(3)
+        direct     = np.zeros(3)
+        indirect   = np.zeros(3)
         throughput = np.ones(3)
-        nee_value = np.zeros(3)
-        has_nee = False
+        nee_value  = np.zeros(3)
+        has_nee    = False
 
         for depth in range(self.max_depth):
+
             tri, t = self.scene.intersect(orig, direction)
 
             if tri is None:
                 break
 
             hit_point = orig + t * direction
-            mat = tri.material
-            normal = tri.normal
+            mat       = tri.material
+            normal    = tri.normal
 
+            # Нормаль смотрит навстречу лучу
             if np.dot(normal, direction) > 0:
                 normal = -normal
 
-            # Эмиссия (источник света, обнаруженный через случайный bounce)
+            # Эмиссия (источник света)
             if mat.is_emitter:
                 if has_nee:
-                    # Компенсируем двойной счёт: если мы уже учли этот вклад
-                    # через NEE, вычитаем его из indirect
-                    indirect_color -= nee_value
-                indirect_color += throughput * mat.emission
+                    color -= nee_value
+                    indirect -= nee_value
+                emission_contrib = throughput * mat.emission
+                color += emission_contrib
+                indirect += emission_contrib
                 break
 
             # Русская рулетка
@@ -373,53 +415,56 @@ class PathTracerGBuf:
 
             if np.random.random() < p_diff:
                 # Диффузное отражение
-                # NEE: прямое освещение -> direct
+                # NEE: прямое освещение
                 nee_value = throughput * self._direct_light(hit_point, normal, mat)
-                direct_color += nee_value
+                color += nee_value
+                direct += nee_value
                 has_nee = True
-
-                # Продолжаем путь (косвенное освещение)
+                # Продолжаем путь
                 new_dir = cosine_sample_hemisphere(normal)
                 throughput = throughput * mat.diffuse
             else:
-                # Specular: вклад в indirect
                 new_dir = reflect(direction, normal)
                 throughput = throughput * mat.specular
                 has_nee = False
                 nee_value = np.zeros(3)
 
-            orig = hit_point + normal * EPS
+            orig      = hit_point + normal * EPS
             direction = new_dir
 
-        return direct_color, indirect_color
+        return color, direct, indirect
 
+    # Прямое освещение
     def _direct_light(self, point: np.ndarray, normal: np.ndarray,
                       mat: Material) -> np.ndarray:
-        """Прямое освещение через явную выборку источника (NEE)."""
+        """Выборка прямого освещения через один случайный источник"""
         light = self.scene.sample_light()
         if light is None:
             return np.zeros(3)
 
-        light_point = light.sample_point()
-        to_light = light_point - point
-        dist = np.linalg.norm(to_light)
+        light_point  = light.sample_point()
+        to_light     = light_point - point
+        dist         = np.linalg.norm(to_light)
         if dist < EPS:
             return np.zeros(3)
-        to_light_n = to_light / dist
+        to_light_n   = to_light / dist
 
-        cos_surf = np.dot(normal, to_light_n)
+        cos_surf  = np.dot(normal, to_light_n)
         cos_light = np.dot(-light.normal, to_light_n)
 
         if cos_surf <= 0 or cos_light <= 0:
             return np.zeros(3)
 
+        # Проверка тени
         if self.scene.is_occluded(point + normal * EPS, to_light_n, dist):
             return np.zeros(3)
 
+        # Полный pdf выборки: p_select / area
         pdf_light = self.scene.light_pdf(light)
         if pdf_light < EPS:
             return np.zeros(3)
 
+        # Геометрический терм
         geom = cos_surf * cos_light / (dist * dist)
         contrib = light.material.emission * (mat.diffuse / np.pi) * geom / pdf_light
         return contrib
@@ -430,37 +475,35 @@ class PathTracerGBuf:
 # ---------------------------------------------------------------------------
 
 # Глобальные переменные воркеров
-_w_tracer: Optional[PathTracerGBuf] = None
+_w_tracer: Optional[PathTracer] = None
 _w_camera: Optional[Camera] = None
 
 
-def _worker_init(tracer: PathTracerGBuf, camera: Camera):
+def _worker_init(tracer: PathTracer, camera: Camera):
     global _w_tracer, _w_camera
     _w_tracer = tracer
     _w_camera = camera
+    # Уникальный seed для каждого воркера
     np.random.seed(os.getpid())
 
 
 def _render_row_gbuf(args: Tuple[int, int]) -> Tuple[int, np.ndarray, np.ndarray,
                                                        np.ndarray, np.ndarray, np.ndarray]:
     """
-    Рендерит одну строку, возвращая:
-    py, direct_row, indirect_row, depth_row, normal_row, obj_idx_row
+    Рендерит одну строку изображения, возвращая:
+    py, total_row, direct_row, depth_row, normal_row, obj_idx_row
     """
     py, spp = args
     W = _w_camera.width
 
-    direct_row = np.zeros((W, 3))
-    indirect_row = np.zeros((W, 3))
-    depth_row = np.full(W, INF)
-    normal_row = np.zeros((W, 3))
+    total_row   = np.zeros((W, 3))
+    direct_row  = np.zeros((W, 3))
+    depth_row   = np.full(W, INF)
+    normal_row  = np.zeros((W, 3))
     obj_idx_row = np.full(W, -1, dtype=np.int32)
 
     for px in range(W):
-        d_acc = np.zeros(3)
-        i_acc = np.zeros(3)
-
-        # Первый сэмпл — заполнить G-буферы
+        # Первый сэмпл — заполнить G-буферы из первичного луча
         first_orig, first_dir = _w_camera.get_ray(px, py)
         tri, t = _w_tracer.scene.intersect(first_orig, first_dir)
         if tri is not None:
@@ -469,23 +512,24 @@ def _render_row_gbuf(args: Tuple[int, int]) -> Tuple[int, np.ndarray, np.ndarray
             if np.dot(n, first_dir) > 0:
                 n = -n
             normal_row[px] = n
-            obj_idx_row[px] = tri.tri_index
+            obj_idx_row[px] = _w_tracer.scene.get_tri_index(tri)
 
         # Накопление всех сэмплов
-        d_acc, i_acc = _w_tracer.trace(first_orig, first_dir)
-        total_d = d_acc.copy()
-        total_i = i_acc.copy()
+        total_acc = np.zeros(3)
+        direct_acc = np.zeros(3)
+        for s in range(spp):
+            if s == 0:
+                orig, direction = first_orig, first_dir
+            else:
+                orig, direction = _w_camera.get_ray(px, py)
+            c, d, i = _w_tracer.trace(orig, direction)
+            total_acc += c
+            direct_acc += d
 
-        for _ in range(1, spp):
-            orig, direction = _w_camera.get_ray(px, py)
-            d, i = _w_tracer.trace(orig, direction)
-            total_d += d
-            total_i += i
+        total_row[px] = total_acc / spp
+        direct_row[px] = direct_acc / spp
 
-        direct_row[px] = total_d / spp
-        indirect_row[px] = total_i / spp
-
-    return py, direct_row, indirect_row, depth_row, normal_row, obj_idx_row
+    return py, total_row, direct_row, depth_row, normal_row, obj_idx_row
 
 
 def render_with_gbuf(scene: Scene, camera: Camera,
@@ -504,13 +548,13 @@ def render_with_gbuf(scene: Scene, camera: Camera,
     """
     W, H = camera.width, camera.height
     scene.build_accel()
-    tracer = PathTracerGBuf(scene, camera, max_depth=max_depth)
+    tracer = PathTracer(scene, camera, max_depth=max_depth)
 
-    direct_buf = np.zeros((H, W, 3), dtype=np.float64)
-    indirect_buf = np.zeros((H, W, 3), dtype=np.float64)
-    depth_buf = np.full((H, W), INF, dtype=np.float64)
-    normal_buf = np.zeros((H, W, 3), dtype=np.float64)
-    objidx_buf = np.full((H, W), -1, dtype=np.int32)
+    total_buf   = np.zeros((H, W, 3), dtype=np.float64)
+    direct_buf  = np.zeros((H, W, 3), dtype=np.float64)
+    depth_buf   = np.full((H, W), INF, dtype=np.float64)
+    normal_buf  = np.zeros((H, W, 3), dtype=np.float64)
+    objidx_buf  = np.full((H, W), -1, dtype=np.int32)
 
     start_time = time.time()
     ncpus = mp.cpu_count()
@@ -522,10 +566,10 @@ def render_with_gbuf(scene: Scene, camera: Camera,
             for i, result in enumerate(
                     pool.imap_unordered(_render_row_gbuf,
                                         [(py, spp) for py in range(H)])):
-                py, d_row, i_row, z_row, n_row, o_row = result
+                py, t_row, d_row, z_row, n_row, o_row = result
+                total_buf[py]  = t_row
                 direct_buf[py] = d_row
-                indirect_buf[py] = i_row
-                depth_buf[py] = z_row
+                depth_buf[py]  = z_row
                 normal_buf[py] = n_row
                 objidx_buf[py] = o_row
 
@@ -537,27 +581,30 @@ def render_with_gbuf(scene: Scene, camera: Camera,
     else:
         for py in range(H):
             result = _render_row_gbuf((py, spp))
-            _, d_row, i_row, z_row, n_row, o_row = result
+            _, t_row, d_row, z_row, n_row, o_row = result
+            total_buf[py]  = t_row
             direct_buf[py] = d_row
-            indirect_buf[py] = i_row
-            depth_buf[py] = z_row
+            depth_buf[py]  = z_row
             normal_buf[py] = n_row
             objidx_buf[py] = o_row
 
             elapsed = time.time() - start_time
             done = (py + 1) * W
             eta = elapsed / done * (W * H - done) if done else 0
-            print(f"\r  Строка {py+1:4d}/{H}  ETA {eta:6.1f} с   ",
-                  end="", flush=True)
+            print(f"\r  Строка {py+1:4d}/{H}  "
+                  f"ETA {eta:6.1f} с   ", end="", flush=True)
 
     print(f"\nРендер завершён за {time.time() - start_time:.1f} с")
 
+    # indirect = total - direct
+    indirect_buf = total_buf - direct_buf
+
     return {
-        'direct_light': direct_buf,
+        'direct_light':   direct_buf,
         'indirect_light': indirect_buf,
-        'depth_map': depth_buf,
-        'normal_map': normal_buf,
-        'object_index': objidx_buf,
+        'depth_map':      depth_buf,
+        'normal_map':     normal_buf,
+        'object_index':   objidx_buf,
     }
 
 
@@ -662,25 +709,20 @@ def joint_bilateral_filter(
     # ---------------------------------------------------------------------------
     # 1. Предвычисление пространственного гауссиана G_s
     # ---------------------------------------------------------------------------
-    # Создаём ядро G_s размера (2r+1) × (2r+1)
     # G_s(dx, dy) = exp(-(dx² + dy²) / (2 * σ_s²))
     ax = np.arange(-radius, radius + 1, dtype=np.float64)
     xx, yy = np.meshgrid(ax, ax)
     spatial_kernel = np.exp(-(xx ** 2 + yy ** 2) / (2.0 * sigma_s ** 2))
-    # Форма: (kernel_size, kernel_size), kernel_size = 2*radius + 1
 
     # ---------------------------------------------------------------------------
-    # 2. Подготовка данных — заменяем невалидные пиксели (нет попадания луча)
+    # 2. Подготовка данных
     # ---------------------------------------------------------------------------
-    # Нормализуем normal_map (на всякий случай)
+    # Нормализуем normal_map
     normal_norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
     normal_norms = np.where(normal_norms < EPS, 1.0, normal_norms)
     normals = normal_map / normal_norms
 
-    # Для depth_map: помечаем пиксели без попадания как бесконечность
     depth = depth_map.copy()
-
-    # Для object_index: помечаем -1 как уникальный индекс (не совпадёт ни с чем)
     obj_idx = object_index.copy()
 
     # ---------------------------------------------------------------------------
@@ -697,7 +739,6 @@ def joint_bilateral_filter(
     # ---------------------------------------------------------------------------
     # 4. Основной цикл фильтрации
     # ---------------------------------------------------------------------------
-    # Итоговое изображение и карта весов
     result = np.zeros_like(noisy_image, dtype=np.float64)
     weight_sum = np.zeros((H, W), dtype=np.float64)
 
@@ -708,25 +749,18 @@ def joint_bilateral_filter(
             # Пространственный вес G_s для этого смещения
             gs = spatial_kernel[dy, dx]
 
-            # Срезы для пикселей p и их соседей q = p + (dx - radius, dy - radius)
-            # q-область в padded массиве
+            # Срезы соседей q в padded массиве
             q_y_start = dy
             q_y_end = dy + H
             q_x_start = dx
             q_x_end = dx + W
 
-            # Соседние значения
-            f_q = noisy_pad[q_y_start:q_y_end, q_x_start:q_x_end]  # (H, W, 3)
-            depth_q = depth_pad[q_y_start:q_y_end, q_x_start:q_x_end]  # (H, W)
-            normals_q = normals_pad[q_y_start:q_y_end, q_x_start:q_x_end]  # (H, W, 3)
-            objidx_q = objidx_pad[q_y_start:q_y_end, q_x_start:q_x_end]  # (H, W)
-
-            # ---------------------------------------------------------------------------
-            # Вычисление диапазонных весов G_r
-            # ---------------------------------------------------------------------------
+            f_q = noisy_pad[q_y_start:q_y_end, q_x_start:q_x_end]
+            depth_q = depth_pad[q_y_start:q_y_end, q_x_start:q_x_end]
+            normals_q = normals_pad[q_y_start:q_y_end, q_x_start:q_x_end]
+            objidx_q = objidx_pad[q_y_start:q_y_end, q_x_start:q_x_end]
 
             # G_r_obj: жёсткая маска по индексу объекта
-            # = 0 если разные объекты, = 1 если один объект
             gr_obj = (obj_idx == objidx_q).astype(np.float64)
 
             # G_r_depth: гауссиан от разницы глубин
@@ -736,29 +770,24 @@ def joint_bilateral_filter(
 
             # G_r_normal: гауссиан от угла между нормалями
             # exp(-(1 - dot(n_p, n_q)) / (2 * σ_n²))
-            # dot product по каналам: sum(n_p * n_q, axis=2)
-            dot_pn = np.sum(normals * normals_q, axis=2)  # (H, W)
-            # Ограничиваем dot product в [−1, 1] для численной стабильности
+            dot_pn = np.sum(normals * normals_q, axis=2)
             dot_pn = np.clip(dot_pn, -1.0, 1.0)
             gr_normal = np.exp(-(1.0 - dot_pn) / (2.0 * sigma_n ** 2))
 
             # Итоговый диапазонный вес
-            gr = gr_obj * gr_depth * gr_normal  # (H, W)
+            gr = gr_obj * gr_depth * gr_normal
 
-            # Полный вес для этого смещения: G_s * G_r
-            w = gs * gr  # (H, W)
+            # Полный вес: G_s * G_r
+            w = gs * gr
 
-            # Накопление взвешенной суммы
-            # f(q) * w, разворачиваем w до (H, W, 1) для broadcasts
+            # Накопление
             result += f_q * w[:, :, np.newaxis]
             weight_sum += w
 
     # ---------------------------------------------------------------------------
     # 5. Нормировка (закон сохранения энергии)
     # ---------------------------------------------------------------------------
-    # W_p = Σ G_s * G_r для каждого пикселя
-    # g(p) = result / W_p
-    # Гарантирует, что g(p) — взвешенное среднее с Σ весов = 1
+    # g(p) = result / W_p  — взвешенное среднее с Σ весов = 1
     weight_sum = np.where(weight_sum < EPS, 1.0, weight_sum)
     result = result / weight_sum[:, :, np.newaxis]
 
@@ -777,7 +806,7 @@ def tone_map_and_save(hdr: np.ndarray, output_path: str,
     Работает в линейном RGB, гамма применяется в самом конце.
     """
     img = hdr * exposure
-    lum = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
+    lum = 0.2126 * img[:,:,0] + 0.7152 * img[:,:,1] + 0.0722 * img[:,:,2]
     nonzero = lum[lum > EPS]
     if len(nonzero) > 0:
         mean_lum = np.mean(nonzero)
@@ -790,7 +819,6 @@ def tone_map_and_save(hdr: np.ndarray, output_path: str,
     _save_ppm(img_uint8, output_path)
     print(f"Изображение сохранено: {output_path}")
 
-    # Попытка сохранить PNG через PIL (если доступна)
     try:
         from PIL import Image
         png_path = output_path.rsplit('.', 1)[0] + '.png'
@@ -809,53 +837,46 @@ def _save_ppm(img: np.ndarray, path: str):
 
 
 # ---------------------------------------------------------------------------
-# Построение тестовой сцены — Корнельская коробка
+# Построение тестовой сцены — Корнельская коробка (из lab4)
 # ---------------------------------------------------------------------------
 
 def build_cornell_box() -> Tuple[Scene, Camera]:
     scene = Scene()
 
-    white = Material(diffuse=np.array([0.73, 0.73, 0.73]))
-    red = Material(diffuse=np.array([0.65, 0.05, 0.05]))
-    green = Material(diffuse=np.array([0.12, 0.45, 0.15]))
+    white  = Material(diffuse=np.array([0.73, 0.73, 0.73]))
+    red    = Material(diffuse=np.array([0.65, 0.05, 0.05]))
+    green  = Material(diffuse=np.array([0.12, 0.45, 0.15]))
     mirror = Material(diffuse=np.zeros(3),
                       specular=np.array([0.95, 0.95, 0.95]))
-    mixed = Material(diffuse=np.array([0.5, 0.4, 0.1]),
-                     specular=np.array([0.4, 0.4, 0.4]))
+    mixed  = Material(diffuse=np.array([0.5, 0.4, 0.1]),
+                      specular=np.array([0.4, 0.4, 0.4]))
     light_mat = Material(emission=np.array([8.0, 8.0, 6.5]))
 
-    tri_counter = 0
-
     def quad(v0, v1, v2, v3, mat):
-        nonlocal tri_counter
-        t1 = Triangle(np.array(v0), np.array(v1), np.array(v2), mat,
-                       tri_index=tri_counter)
-        tri_counter += 1
-        t2 = Triangle(np.array(v0), np.array(v2), np.array(v3), mat,
-                       tri_index=tri_counter)
-        tri_counter += 1
-        return [t1, t2]
+        """Квад == два треугольника"""
+        return [Triangle(np.array(v0), np.array(v1), np.array(v2), mat),
+                Triangle(np.array(v0), np.array(v2), np.array(v3), mat)]
 
     # Пол
     scene.add_triangles(quad(
-        [0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1], white))
+        [0,0,0],[1,0,0],[1,0,1],[0,0,1], white))
     # Потолок
     scene.add_triangles(quad(
-        [0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0], white))
+        [0,1,0],[0,1,1],[1,1,1],[1,1,0], white))
     # Задняя стена
     scene.add_triangles(quad(
-        [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1], white))
+        [0,0,1],[1,0,1],[1,1,1],[0,1,1], white))
     # Левая стена (красная)
     scene.add_triangles(quad(
-        [0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0], red))
+        [0,0,0],[0,0,1],[0,1,1],[0,1,0], red))
     # Правая стена (зелёная)
     scene.add_triangles(quad(
-        [1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1], green))
+        [1,0,0],[1,1,0],[1,1,1],[1,0,1], green))
 
     # Источник света на потолке
     scene.add_triangles(quad(
-        [0.35, 0.999, 0.35], [0.65, 0.999, 0.35],
-        [0.65, 0.999, 0.65], [0.35, 0.999, 0.65], light_mat))
+        [0.35,0.999,0.35],[0.65,0.999,0.35],
+        [0.65,0.999,0.65],[0.35,0.999,0.65], light_mat))
 
     def rotated_box(x0, y0, z0, x1, y1, z1, mat, angle_deg=0):
         cx = (x0 + x1) / 2
@@ -865,21 +886,21 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
 
         def rot(v):
             dx, dz = v[0] - cx, v[2] - cz
-            return [cx + dx * ca - dz * sa, v[1], cz + dx * sa + dz * ca]
+            return [cx + dx*ca - dz*sa, v[1], cz + dx*sa + dz*ca]
 
         tris = []
-        tris += quad(rot([x0, y0, z0]), rot([x1, y0, z0]),
-                     rot([x1, y0, z1]), rot([x0, y0, z1]), mat)
-        tris += quad(rot([x0, y1, z0]), rot([x0, y1, z1]),
-                     rot([x1, y1, z1]), rot([x1, y1, z0]), mat)
-        tris += quad(rot([x0, y0, z0]), rot([x0, y0, z1]),
-                     rot([x0, y1, z1]), rot([x0, y1, z0]), mat)
-        tris += quad(rot([x1, y0, z0]), rot([x1, y1, z0]),
-                     rot([x1, y1, z1]), rot([x1, y0, z1]), mat)
-        tris += quad(rot([x0, y0, z0]), rot([x0, y1, z0]),
-                     rot([x1, y1, z0]), rot([x1, y0, z0]), mat)
-        tris += quad(rot([x0, y0, z1]), rot([x1, y0, z1]),
-                     rot([x1, y1, z1]), rot([x0, y1, z1]), mat)
+        tris += quad(rot([x0,y0,z0]), rot([x1,y0,z0]),
+                     rot([x1,y0,z1]), rot([x0,y0,z1]), mat)  # дно
+        tris += quad(rot([x0,y1,z0]), rot([x0,y1,z1]),
+                     rot([x1,y1,z1]), rot([x1,y1,z0]), mat)  # крыша
+        tris += quad(rot([x0,y0,z0]), rot([x0,y0,z1]),
+                     rot([x0,y1,z1]), rot([x0,y1,z0]), mat)  # лево
+        tris += quad(rot([x1,y0,z0]), rot([x1,y1,z0]),
+                     rot([x1,y1,z1]), rot([x1,y0,z1]), mat)  # право
+        tris += quad(rot([x0,y0,z0]), rot([x0,y1,z0]),
+                     rot([x1,y1,z0]), rot([x1,y0,z0]), mat)  # перед
+        tris += quad(rot([x0,y0,z1]), rot([x1,y0,z1]),
+                     rot([x1,y1,z1]), rot([x0,y1,z1]), mat)  # зад
         return tris
 
     scene.add_triangles(rotated_box(0.55, 0.0, 0.42,
@@ -887,13 +908,14 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
     scene.add_triangles(rotated_box(0.18, 0.0, 0.18,
                                     0.45, 0.3, 0.45, mixed, angle_deg=20))
 
+    # Камера
     camera = Camera(
-        position=np.array([0.5, 0.5, -1.4]),
-        look_at=np.array([0.5, 0.5, 0.5]),
-        up=np.array([0.0, 1.0, 0.0]),
-        fov_deg=40.0,
-        width=512,
-        height=512
+        position = np.array([0.5, 0.5, -1.4]),
+        look_at  = np.array([0.5, 0.5, 0.5]),
+        up       = np.array([0.0, 1.0, 0.0]),
+        fov_deg  = 40.0,
+        width    = 512,
+        height   = 512
     )
 
     return scene, camera
@@ -911,15 +933,15 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Параметры рендера
-    SPP = 64
+    SPP       = 64
     MAX_DEPTH = 8
-    GAMMA = 2.2
+    GAMMA     = 2.2
 
     # Параметры билатерального фильтра
     SIGMA_S = 4.0    # Пространственная сигма
     SIGMA_Z = 0.05   # Сигма глубины
     SIGMA_N = 0.15   # Сигма нормалей
-    RADIUS = 8       # Радиус ядра (≈ 2 × sigma_s)
+    RADIUS  = 8      # Радиус ядра (≈ 2 × sigma_s)
 
     print(f"\n--- Рендеринг с G-буферами (SPP={SPP}) ---")
     print("Построение сцены (Корнельская коробка)...")
@@ -930,13 +952,13 @@ if __name__ == "__main__":
     # Шаг 1: Рендеринг с G-буферами
     gbuf = render_with_gbuf(scene, camera, spp=SPP, max_depth=MAX_DEPTH)
 
-    direct = gbuf['direct_light']
-    indirect = gbuf['indirect_light']
+    direct    = gbuf['direct_light']
+    indirect  = gbuf['indirect_light']
     depth_map = gbuf['depth_map']
     normal_map = gbuf['normal_map']
-    obj_idx = gbuf['object_index']
+    obj_idx   = gbuf['object_index']
 
-    # Исходное (незафильтированное) изображение
+    # Исходное (нефильтрованное) изображение
     total_unfiltered = direct + indirect
 
     print(f"\n--- Сохранение исходного изображения ---")
