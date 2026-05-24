@@ -570,40 +570,24 @@ def render_with_gbuf(scene: Scene, camera: Camera,
     start_time = time.time()
     ncpus = mp.cpu_count()
 
-    if ncpus > 1:
-        print(f"  Используем {ncpus} процессов")
-        with mp.Pool(ncpus, initializer=_worker_init,
-                     initargs=(tracer, camera)) as pool:
-            for i, result in enumerate(
-                    pool.imap_unordered(_render_row_gbuf,
-                                        [(py, spp) for py in range(H)])):
-                py, t_row, d_row, z_row, n_row, o_row = result
-                total_buf[py]  = t_row
-                direct_buf[py] = d_row
-                depth_buf[py]  = z_row
-                normal_buf[py] = n_row
-                objidx_buf[py] = o_row
-
-                pct = (i + 1) * 100 // H
-                elapsed = time.time() - start_time
-                eta = elapsed / (i + 1) * (H - i - 1)
-                print(f"\r  Строка {i+1:4d}/{H} ({pct:3d}%)  "
-                      f"ETA {eta:6.1f} с   ", end="", flush=True)
-    else:
-        for py in range(H):
-            result = _render_row_gbuf((py, spp))
-            _, t_row, d_row, z_row, n_row, o_row = result
+    print(f"  Используем {ncpus} процессов")
+    with mp.Pool(ncpus, initializer=_worker_init,
+                    initargs=(tracer, camera)) as pool:
+        for i, result in enumerate(
+                pool.imap_unordered(_render_row_gbuf,
+                                    [(py, spp) for py in range(H)])):
+            py, t_row, d_row, z_row, n_row, o_row = result
             total_buf[py]  = t_row
             direct_buf[py] = d_row
             depth_buf[py]  = z_row
             normal_buf[py] = n_row
             objidx_buf[py] = o_row
 
+            pct = (i + 1) * 100 // H
             elapsed = time.time() - start_time
-            done = (py + 1) * W
-            eta = elapsed / done * (W * H - done) if done else 0
-            print(f"\r  Строка {py+1:4d}/{H}  "
-                  f"ETA {eta:6.1f} с   ", end="", flush=True)
+            eta = elapsed / (i + 1) * (H - i - 1)
+            print(f"\r  Строка {i+1:4d}/{H} ({pct:3d}%)  "
+                    f"ETA {eta:6.1f} с   ", end="", flush=True)
 
     print(f"\nРендер завершён за {time.time() - start_time:.1f} с")
 
