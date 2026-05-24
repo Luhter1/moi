@@ -187,8 +187,19 @@ class Scene:
         self._e1f = np.array([t.e1 for t in self.triangles]).ravel().astype(np.float64)
         self._e2f = np.array([t.e2 for t in self.triangles]).ravel().astype(np.float64)
         self._accel_built = True
-        # Строим маппинг для object_index
-        self._tri_id_to_idx = {id(t): i for i, t in enumerate(self.triangles)}
+        # Группируем треугольники по материалу: одна поверхность = один индекс.
+        # Треугольники с одинаковым материалом (пол, стена, грань бокса)
+        # получают один object_index — фильтр не создаёт швов внутри поверхности.
+        # Depth/normal веса по-прежнему не дают смешивать разные поверхности
+        # с одним материалом (пол vs потолок).
+        mat_to_idx = {}
+        next_idx = 0
+        for t in self.triangles:
+            mat_id = id(t.material)
+            if mat_id not in mat_to_idx:
+                mat_to_idx[mat_id] = next_idx
+                next_idx += 1
+            self._tri_id_to_idx[id(t)] = mat_to_idx[mat_id]
 
     def intersect(self, orig: np.ndarray, direction: np.ndarray
                   ) -> Tuple[Optional[Triangle], float]:
@@ -938,10 +949,10 @@ if __name__ == "__main__":
     GAMMA     = 2.2
 
     # Параметры билатерального фильтра
-    SIGMA_S = 4.0    # Пространственная сигма
+    SIGMA_S = 2.5    # Пространственная сигма (меньше → меньше размытие)
     SIGMA_Z = 0.05   # Сигма глубины
-    SIGMA_N = 0.15   # Сигма нормалей
-    RADIUS  = 8      # Радиус ядра (≈ 2 × sigma_s)
+    SIGMA_N = 0.08   # Сигма нормалей (меньше → резче геометрические границы)
+    RADIUS  = 6      # Радиус ядра (≈ 2 × sigma_s)
 
     print(f"\n--- Рендеринг с G-буферами (SPP={SPP}) ---")
     print("Построение сцены (Корнельская коробка)...")
