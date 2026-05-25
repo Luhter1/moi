@@ -1,17 +1,7 @@
 """
-Lab 5: Joint Bilateral Filter для подавления шума в Path Tracing.
-
-Архитектура:
-1. Рендерер из lab4 (без изменений) — трассировка путей с G-буферами
-   (direct_light, indirect_light, depth_map, normal_map, object_index).
-2. Joint Bilateral Filter — фильтрация только indirect_light с использованием
-   G-буферов в качестве весов, предотвращающих размытие границ.
-3. Тональная компрессия, гамма-коррекция, сохранение результата.
-
-Физическая корректность:
-- Вся обработка ведётся в линейном RGB пространстве.
-- Гамма-коррекция применяется только после фильтрации.
-- Энергосбережение обеспечивается нормировкой весов фильтра.
+рендерим сцену как обычно, но дополнительно сохраняем G-буферы
+(глубину, нормали, id объекта). Потом фильтруем только indirect-составляющую -
+при малом числе сэмплов сильно шумит. G-буферы помогают не замылить границы объектов.
 """
 
 import numpy as np
@@ -25,10 +15,7 @@ EPS = 1e-6
 INF = 1e30
 
 
-# ---------------------------------------------------------------------------
 # Вспомогательные математические функции (из lab4)
-# ---------------------------------------------------------------------------
-
 def luminance(c: np.ndarray) -> float:
     """Воспринимаемая яркость цвета, перевод линейного rgb в яркость"""
     return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
@@ -59,23 +46,20 @@ def cosine_sample_hemisphere(normal: np.ndarray) -> np.ndarray:
     return x * t + y * b + z * normal
 
 
-# ---------------------------------------------------------------------------
 # Структуры данных сцены (из lab4)
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Material:
     """
     Материал поверхности
 
-    эмиссия — способность поверхности самой излучать свет, а не только отражать падающий свет
+    эмиссия - способность поверхности самой излучать свет, а не только отражать падающий свет
     """
     diffuse:  np.ndarray = field(default_factory=lambda: np.array([0.8, 0.8, 0.8]))
     specular: np.ndarray = field(default_factory=lambda: np.zeros(3))
     emission: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def __post_init__(self):
-        # Гарантируем сохранение энергии: kd + ks <= 1 покомпонентно
+        # kd + ks не должно превышать 1, иначе энергия берётся из ниоткуда
         total = self.diffuse + self.specular
         mask = total > 1.0
         if np.any(mask):
@@ -93,10 +77,10 @@ class Triangle:
     """
     Один треугольник сетки
 
-    - v0, v1, v2 — координаты вершин
-    - e1, e2 — рёбра треугольника
-    - normal — нормаль треугольника
-    - area — площадь треугольника
+    - v0, v1, v2 - координаты вершин
+    - e1, e2 - рёбра треугольника
+    - normal - нормаль треугольника
+    - area - площадь треугольника
     """
     v0: np.ndarray
     v1: np.ndarray
@@ -119,9 +103,7 @@ class Triangle:
 
     def intersect(self, ray_orig: np.ndarray, ray_dir: np.ndarray
                   ) -> Optional[float]:
-        """
-        Алгоритм Мёллера–Трумбора. Возвращает t или None.
-        """
+        """Мёллер–Трумбор: пересечение луча с треугольником, возвращает t или None"""
         h  = np.cross(ray_dir, self.e2)
         a  = np.dot(self.e1, h)
         if abs(a) < EPS:
@@ -139,10 +121,7 @@ class Triangle:
         return t if t > EPS else None
 
 
-# ---------------------------------------------------------------------------
 # Сцена (из lab4)
-# ---------------------------------------------------------------------------
-
 class Scene:
     def __init__(self):
         self.triangles: List[Triangle] = []
@@ -154,7 +133,7 @@ class Scene:
         self._e1f: np.ndarray = np.array([])
         self._e2f: np.ndarray = np.array([])
         self._n_tri: int = 0
-        # Маппинг id(triangle) -> индекс в self.triangles (для object_index)
+        # Маппинг id(triangle) -> индекс в self.triangles (чтобы знать, какому объекту принадлежит треугольник)
         self._tri_id_to_idx: dict = {}
 
     def add_triangle(self, tri: Triangle):
@@ -177,7 +156,7 @@ class Scene:
         self._light_pdf_map = {id(t): i for i, t in enumerate(self._lights)}
 
     def build_accel(self):
-        """Создать flat numpy-массивы для векторизованных пересечений."""
+        """собираем плоские numpy-массивы, чтобы пересечения считались быстро"""
         self._rebuild_light_cache()
         N = len(self.triangles)
         self._n_tri = N
@@ -187,11 +166,9 @@ class Scene:
         self._e1f = np.array([t.e1 for t in self.triangles]).ravel().astype(np.float64)
         self._e2f = np.array([t.e2 for t in self.triangles]).ravel().astype(np.float64)
         self._accel_built = True
-        # Группируем треугольники по материалу: одна поверхность = один индекс.
-        # Треугольники с одинаковым материалом (пол, стена, грань бокса)
-        # получают один object_index — фильтр не создаёт швов внутри поверхности.
-        # Depth/normal веса по-прежнему не дают смешивать разные поверхности
-        # с одним материалом (пол vs потолок).
+        # группируем по материалу: если у полигона тот же материал, что у соседа -
+        # они один "объект", фильтр не будет делать шов внутри одной поверхности.
+        # (depth/normal всё равно разделят пол и потолок, даже если материал одинаковый)
         mat_to_idx = {}
         next_idx = 0
         for t in self.triangles:
@@ -207,12 +184,12 @@ class Scene:
         d = direction
         v0f = self._v0f; e1f = self._e1f; e2f = self._e2f
 
-        # h = cross(d, e2)
+        # cross(d, e2) - разложено покомпонентно для скорости
         hx = d[1]*e2f[2::3] - d[2]*e2f[1::3]
         hy = d[2]*e2f[0::3] - d[0]*e2f[2::3]
         hz = d[0]*e2f[1::3] - d[1]*e2f[0::3]
 
-        # a = dot(e1, h)
+        # dot(e1, h) - определитель матрицы Мёллера–Трумбора
         a = e1f[0::3]*hx + e1f[1::3]*hy + e1f[2::3]*hz
 
         valid = np.abs(a) > EPS
@@ -228,20 +205,20 @@ class Scene:
         sy = orig[1] - v0f[1::3]
         sz = orig[2] - v0f[2::3]
 
-        # u = f * dot(s, h)
+        # барицентрическая координата u
         u = f * (sx*hx + sy*hy + sz*hz)
         valid &= (u >= 0.0) & (u <= 1.0)
 
-        # q = cross(s, e1)
+        # q = cross(s, e1) - для второй барицентрической координаты
         qx = sy*e1f[2::3] - sz*e1f[1::3]
         qy = sz*e1f[0::3] - sx*e1f[2::3]
         qz = sx*e1f[1::3] - sy*e1f[0::3]
 
-        # v = f * dot(d, q)
+        # барицентрическая координата v
         v = f * (d[0]*qx + d[1]*qy + d[2]*qz)
         valid &= (v >= 0.0) & (u + v <= 1.0)
 
-        # t = f * dot(e2, q)
+        # расстояние вдоль луча
         t = f * (e2f[0::3]*qx + e2f[1::3]*qy + e2f[2::3]*qz)
         valid &= (t > EPS)
 
@@ -290,7 +267,7 @@ class Scene:
 
         return bool(np.any(valid))
 
-    # Выборка источника
+    # выборка источника света
     def sample_light(self) -> Optional[Triangle]:
         if not self._lights:
             return None
@@ -305,21 +282,18 @@ class Scene:
         return self._light_powers[idx] / light.area
 
     def get_tri_index(self, tri: Triangle) -> int:
-        """Возвращает индекс треугольника в сцене для object_index."""
+        """какому объекту принадлежит треугольник"""
         return self._tri_id_to_idx.get(id(tri), -1)
 
 
-# ---------------------------------------------------------------------------
 # Камера (из lab4)
-# ---------------------------------------------------------------------------
-
 class Camera:
     '''
-    - position — положение камеры
-    - look_at — точка, куда смотрит камера
-    - up — вектор "верха"
-    - fov_deg — поле зрения в градусах
-    - width, height — разрешение изображения
+    - position - положение камеры
+    - look_at - точка, куда смотрит камера
+    - up - вектор "верха"
+    - fov_deg - поле зрения в градусах
+    - width, height - разрешение изображения
     '''
     def __init__(self, position: np.ndarray, look_at: np.ndarray,
                  up: np.ndarray, fov_deg: float,
@@ -343,17 +317,14 @@ class Camera:
 
     def get_ray(self, px: int, py: int
                 ) -> Tuple[np.ndarray, np.ndarray]:
-        """Возвращает (origin, direction) с антиалиасингом"""
+        """генерируем луч для пикселя (px, py) с небольшим джиттером для антиалиасинга"""
         sx = (px + np.random.random()) / self.width
         sy = (py + np.random.random()) / self.height
         direction = normalize(self.lower_left + sx * self.horiz + sy * self.vert)
         return self.position.copy(), direction
 
 
-# ---------------------------------------------------------------------------
 # Трассировщик путей (из lab4, модифицирован для разделения direct/indirect)
-# ---------------------------------------------------------------------------
-
 class PathTracer:
     def __init__(self, scene: Scene, camera: Camera,
                  max_depth: int = 8,
@@ -363,16 +334,15 @@ class PathTracer:
         self.max_depth     = max_depth
         self.rr_start_depth = rr_start_depth
 
-    # Одна выборка пути — возвращает (total_color, direct_color, indirect_color)
+    # один путь - возвращаем (total, direct, indirect)
     def trace(self, orig: np.ndarray, direction: np.ndarray
               ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Трассировка одного пути.
-        Возвращает (total, direct, indirect).
+        трассируем один путь, возвращаем (total, direct, indirect).
 
-        direct — вклад от NEE (прямое освещение через явную выборку источника).
-        indirect — всё остальное (эмиссия от случайных попаданий, specular, и т.д.).
-        total = direct + indirect.
+        direct - то, что мы посчитали через NEE (явно выбрали источник света).
+        indirect - всё остальное (эмиссия от случайных попаданий, зеркальные отражения и т.д.).
+        total = direct + indirect
         """
         color      = np.zeros(3)
         direct     = np.zeros(3)
@@ -392,11 +362,11 @@ class PathTracer:
             mat       = tri.material
             normal    = tri.normal
 
-            # Нормаль смотрит навстречу лучу
+            # нормаль должна "смотреть" навстречу лучу
             if np.dot(normal, direction) > 0:
                 normal = -normal
 
-            # Эмиссия (источник света)
+            # попали в светящуюся поверхность
             if mat.is_emitter:
                 if has_nee:
                     color -= nee_value
@@ -406,7 +376,7 @@ class PathTracer:
                 indirect += emission_contrib
                 break
 
-            # Русская рулетка
+            # русская рулетка - с некоторой вероятностью обрываем путь
             total_refl = mat.diffuse + mat.specular
             p_continue = min(max(total_refl[0], total_refl[1], total_refl[2]), 0.95)
             if depth >= self.rr_start_depth:
@@ -414,7 +384,7 @@ class PathTracer:
                     break
                 throughput = throughput / p_continue
 
-            # Выбор типа отражения
+            # решаем, диффузное или зеркальное отражение
             diff_weight = max(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2])
             spec_weight = max(mat.specular[0], mat.specular[1], mat.specular[2])
             total_weight = diff_weight + spec_weight
@@ -425,13 +395,12 @@ class PathTracer:
             p_diff = diff_weight / total_weight
 
             if np.random.random() < p_diff:
-                # Диффузное отражение
-                # NEE: прямое освещение
+                # диффузное - считаем прямое освещение через NEE
                 nee_value = throughput * self._direct_light(hit_point, normal, mat)
                 color += nee_value
                 direct += nee_value
                 has_nee = True
-                # Продолжаем путь
+                # и продолжаем путь дальше
                 new_dir = cosine_sample_hemisphere(normal)
                 throughput = throughput * mat.diffuse
             else:
@@ -445,10 +414,10 @@ class PathTracer:
 
         return color, direct, indirect
 
-    # Прямое освещение
+    # прямое освещение через выборку источника
     def _direct_light(self, point: np.ndarray, normal: np.ndarray,
                       mat: Material) -> np.ndarray:
-        """Выборка прямого освещения через один случайный источник"""
+        """считаем прямой свет от одного случайного источника"""
         light = self.scene.sample_light()
         if light is None:
             return np.zeros(3)
@@ -470,7 +439,7 @@ class PathTracer:
         if self.scene.is_occluded(point + normal * EPS, to_light_n, dist):
             return np.zeros(3)
 
-        # Полный pdf выборки: p_select / area
+        # pdf выбора этого источника
         pdf_light = self.scene.light_pdf(light)
         if pdf_light < EPS:
             return np.zeros(3)
@@ -481,11 +450,8 @@ class PathTracer:
         return contrib
 
 
-# ---------------------------------------------------------------------------
 # Рендеринг с G-буферами
-# ---------------------------------------------------------------------------
-
-# Глобальные переменные воркеров
+# глобальные переменные для воркеров multiprocessing
 _w_tracer: Optional[PathTracer] = None
 _w_camera: Optional[Camera] = None
 
@@ -494,16 +460,13 @@ def _worker_init(tracer: PathTracer, camera: Camera):
     global _w_tracer, _w_camera
     _w_tracer = tracer
     _w_camera = camera
-    # Уникальный seed для каждого воркера
+    # у каждого процесса свой seed, чтобы сэмплы не повторялись
     np.random.seed(os.getpid())
 
 
 def _render_row_gbuf(args: Tuple[int, int]) -> Tuple[int, np.ndarray, np.ndarray,
                                                        np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Рендерит одну строку изображения, возвращая:
-    py, total_row, direct_row, depth_row, normal_row, obj_idx_row
-    """
+    """рендерит одну строку картинки, возвращает py + наборы буферов"""
     py, spp = args
     W = _w_camera.width
 
@@ -514,7 +477,7 @@ def _render_row_gbuf(args: Tuple[int, int]) -> Tuple[int, np.ndarray, np.ndarray
     obj_idx_row = np.full(W, -1, dtype=np.int32)
 
     for px in range(W):
-        # Первый сэмпл — заполнить G-буферы из первичного луча
+        # первый сэмпл - заодно заполняем G-буферы
         first_orig, first_dir = _w_camera.get_ray(px, py)
         tri, t = _w_tracer.scene.intersect(first_orig, first_dir)
         if tri is not None:
@@ -525,7 +488,7 @@ def _render_row_gbuf(args: Tuple[int, int]) -> Tuple[int, np.ndarray, np.ndarray
             normal_row[px] = n
             obj_idx_row[px] = _w_tracer.scene.get_tri_index(tri)
 
-        # Накопление всех сэмплов
+        # накапливаем все сэмплы
         total_acc = np.zeros(3)
         direct_acc = np.zeros(3)
         for s in range(spp):
@@ -551,11 +514,11 @@ def render_with_gbuf(scene: Scene, camera: Camera,
 
     Returns:
         dict с ключами:
-            'direct_light'   — (H, W, 3) прямое освещение
-            'indirect_light' — (H, W, 3) косвенное освещение
-            'depth_map'      — (H, W) глубина
-            'normal_map'     — (H, W, 3) нормали
-            'object_index'   — (H, W) индекс объекта
+            'direct_light'   - (H, W, 3) прямое освещение
+            'indirect_light' - (H, W, 3) косвенное освещение
+            'depth_map'      - (H, W) глубина
+            'normal_map'     - (H, W, 3) нормали
+            'object_index'   - (H, W) индекс объекта
     """
     W, H = camera.width, camera.height
     scene.build_accel()
@@ -591,7 +554,7 @@ def render_with_gbuf(scene: Scene, camera: Camera,
 
     print(f"\nРендер завершён за {time.time() - start_time:.1f} с")
 
-    # indirect = total - direct
+    # indirect - это то, что осталось после вычитания direct
     indirect_buf = total_buf - direct_buf
 
     return {
@@ -603,9 +566,7 @@ def render_with_gbuf(scene: Scene, camera: Camera,
     }
 
 
-# ---------------------------------------------------------------------------
 # Joint Bilateral Filter
-# ---------------------------------------------------------------------------
 
 def joint_bilateral_filter(
     noisy_image: np.ndarray,
@@ -618,101 +579,37 @@ def joint_bilateral_filter(
     radius: int = 8,
 ) -> np.ndarray:
     """
-    Joint/Cross Bilateral Filter с использованием G-буферов.
+    Joint Bilateral Filter - убираем шум, но не трогаем границы.
 
-    Фильтрует только зашумлённое изображение (обычно indirect_light),
-    используя пространственные и диапазонные веса из G-буферов.
+    Для каждого пикселя p считаем взвешенное среднее по соседям q:
+        g(p) = sum( f(q) * w(p,q) ) / sum( w(p,q) )
 
-    Математическая модель:
-    ---------------------------------------------------------------------------
-    Для каждого пикселя p вычисляем:
+    Вес w(p,q) = пространственный_гауссиан * диапазонные_веса.
+    Диапазонные веса берём из G-буферов, чтобы не смешивать пиксели
+    с разных объектов/глубин/нормалей.
 
-        g(p) = (1 / W_p) * Σ_{q ∈ S} f(q) * G_s(||p - q||) * G_r(p, q)
+    Три диапазонных веса:
+      1. object: 0 если объекты разные (жёсткая граница), 1 если одинаковые
+      2. depth:  exp(-(dz)² / 2sigma_z²) - чем больше перепад глубины, тем меньше вес
+      3. normal: exp(-(1 - dot(n_p, n_q)) / 2sigma_n²) - чем сильнее нормали "разошлись",
+         тем меньше вес. Сохраняет рёбра и углы геометрии.
 
-    где:
-        f(q)        — цвет пикселя q из зашумлённого изображения
-        G_s(||p-q||) — пространственный вес (гауссиан от расстояния)
-        G_r(p,q)    — диапазонный вес, зависящий от G-буферов
-
-    Пространственный вес:
-        G_s(||p - q||) = exp(-||p - q||² / (2 * σ_s²))
-
-    Диапазонный вес (произведение трёх компонент):
-        G_r(p, q) = G_r_obj(p, q) * G_r_depth(p, q) * G_r_normal(p, q)
-
-    1. G_r_obj(p, q) — индекс объекта:
-       = 0, если object_index[p] ≠ object_index[q]
-         (никогда не смешиваем цвета разных объектов — жёсткая граница)
-       = 1, иначе
-
-    2. G_r_depth(p, q) — разница глубин:
-       = exp(-(depth_map[p] - depth_map[q])² / (2 * σ_z²))
-       Вес падает при большом перепаде глубины, сохраняя границы объектов,
-       расположенных на разных расстояниях от камеры.
-
-    3. G_r_normal(p, q) — разница нормалей:
-       = exp(-(1 - dot(normal_map[p], normal_map[q])) / (2 * σ_n²))
-       Используем (1 - dot(n_p, n_q)) как меру угла между нормалями.
-       Для совпадающих нормалей dot = 1, мера = 0 (максимальный вес).
-       Для ортогональных нормалей dot = 0, мера = 1 (вес падает).
-       Это сохраняет геометрические границы (рёбра, углы).
-
-    Нормировка (закон сохранения энергии):
-    ---------------------------------------------------------------------------
-        W_p = Σ_{q ∈ S} G_s(||p - q||) * G_r(p, q)
-
-    После деления на W_p каждый пиксель g(p) является взвешенным средним
-    соседей с весами, сумма которых равна 1. Это гарантирует:
-        - Локальное сохранение энергии: яркость не добавляется и не удаляется,
-          а только перераспределяется между соседними пикселями.
-        - Глобальное сохранение: Σ_p g(p) ≈ Σ_p f(p) с высокой точностью
-          (небольшие отклонения только на границах изображения из-за padding).
-
-    Чек-лист энергосбережения:
-    ---------------------------------------------------------------------------
-    [✓] Веса нормируются на сумму W_p для каждого пикселя
-    [✓] G_s — гауссиан, всегда ≥ 0
-    [✓] G_r_obj ∈ {0, 1}, никогда не отрицателен
-    [✓] G_r_depth = exp(...) > 0, всегда положителен
-    [✓] G_r_normal = exp(...) > 0, всегда положителен
-    [✓] Все веса ≥ 0 ⇒ W_p > 0 (при ненулевом ядре) ⇒ нормировка корректна
-    [✓] g(p) = взвешенное среднее с Σ weights = 1 ⇒ энергия сохраняется
+    После деления на сумму весов получаем честное среднее - энергия сохраняется.
 
     Параметры:
-    ---------------------------------------------------------------------------
-        sigma_s : float — пространственная сигма гауссиана.
-            Определяет размер области фильтрации.
-            Больше σ_s → сильнее размытие шума, но могут замыться детали.
-            Рекомендуемый диапазон: 2–8 для разрешения 512×512.
-
-        sigma_z : float — сигма для разницы глубин.
-            Определяет, насколько чувствителен фильтр к перепадам глубины.
-            Меньше σ_z → более резкие границы по глубине.
-            Для сцены с глубиной ~0–2 ед.: рекомендуемый диапазон 0.02–0.1.
-
-        sigma_n : float — сигма для разницы нормалей.
-            Определяет, насколько чувствителен фильтр к изменению нормалей.
-            Меньше σ_n → более резкие границы по геометрии.
-            Рекомендуемый диапазон: 0.05–0.3.
-
-        radius : int — радиус ядра фильтра.
-            Ядро имеет размер (2*radius + 1) × (2*radius + 1).
-            Рекомендуется radius ≈ 2 × sigma_s.
+        sigma_s - насколько далеко размазываем (пространственная сигма). Больше = сильнее блюр.
+        sigma_z - порог по глубине. Меньше = резче границы.
+        sigma_n - порог по нормалям. Меньше = резче рёбра.
+        radius  - размер окна фильтра.
     """
     H, W, C = noisy_image.shape
 
-    # ---------------------------------------------------------------------------
-    # 1. Предвычисление пространственного гауссиана G_s
-    # ---------------------------------------------------------------------------
-    # G_s(dx, dy) = exp(-(dx² + dy²) / (2 * σ_s²))
+    # предвычисляем пространственный гауссиан (он одинаковый для всех пикселей)
     ax = np.arange(-radius, radius + 1, dtype=np.float64)
     xx, yy = np.meshgrid(ax, ax)
     spatial_kernel = np.exp(-(xx ** 2 + yy ** 2) / (2.0 * sigma_s ** 2))
 
-    # ---------------------------------------------------------------------------
-    # 2. Подготовка данных
-    # ---------------------------------------------------------------------------
-    # Нормализуем normal_map
+    # подготавливаем данные - нормализуем нормали
     normal_norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
     normal_norms = np.where(normal_norms < EPS, 1.0, normal_norms)
     normals = normal_map / normal_norms
@@ -720,9 +617,7 @@ def joint_bilateral_filter(
     depth = depth_map.copy()
     obj_idx = object_index.copy()
 
-    # ---------------------------------------------------------------------------
-    # 3. Pad массивы для удобства индексации
-    # ---------------------------------------------------------------------------
+    # паддинг - чтобы не вылезать за границы при обходе окна
     pad = radius
     noisy_pad = np.pad(noisy_image, ((pad, pad), (pad, pad), (0, 0)),
                         mode='edge')
@@ -731,9 +626,7 @@ def joint_bilateral_filter(
                           mode='edge')
     objidx_pad = np.pad(obj_idx, ((pad, pad), (pad, pad)), mode='edge')
 
-    # ---------------------------------------------------------------------------
-    # 4. Основной цикл фильтрации
-    # ---------------------------------------------------------------------------
+    # основной цикл: для каждого смещения в окне считаем веса и накопаем
     result = np.zeros_like(noisy_image, dtype=np.float64)
     weight_sum = np.zeros((H, W), dtype=np.float64)
 
@@ -741,10 +634,10 @@ def joint_bilateral_filter(
 
     for dy in range(kernel_size):
         for dx in range(kernel_size):
-            # Пространственный вес G_s для этого смещения
+            # пространственный вес для этого сдвига
             gs = spatial_kernel[dy, dx]
 
-            # Срезы соседей q в padded массиве
+            # соседний пиксель q (в padded координатах)
             q_y_start = dy
             q_y_end = dy + H
             q_x_start = dx
@@ -755,43 +648,36 @@ def joint_bilateral_filter(
             normals_q = normals_pad[q_y_start:q_y_end, q_x_start:q_x_end]
             objidx_q = objidx_pad[q_y_start:q_y_end, q_x_start:q_x_end]
 
-            # G_r_obj: жёсткая маска по индексу объекта
+            # если объекты разные - вес 0, не смешиваем вообще
             gr_obj = (obj_idx == objidx_q).astype(np.float64)
 
-            # G_r_depth: гауссиан от разницы глубин
-            # exp(-(depth_p - depth_q)² / (2 * σ_z²))
+            # чем сильнее перепад глубины - тем меньше вес
             depth_diff = depth - depth_q
             gr_depth = np.exp(-(depth_diff ** 2) / (2.0 * sigma_z ** 2))
 
-            # G_r_normal: гауссиан от угла между нормалями
-            # exp(-(1 - dot(n_p, n_q)) / (2 * σ_n²))
+            # и чем сильнее нормали расходятся - тоже меньше вес
             dot_pn = np.sum(normals * normals_q, axis=2)
             dot_pn = np.clip(dot_pn, -1.0, 1.0)
             gr_normal = np.exp(-(1.0 - dot_pn) / (2.0 * sigma_n ** 2))
 
-            # Итоговый диапазонный вес
+            # общий диапазонный вес
             gr = gr_obj * gr_depth * gr_normal
 
-            # Полный вес: G_s * G_r
+            # полный вес = пространственный × диапазонный
             w = gs * gr
 
-            # Накопление
+            # накопили
             result += f_q * w[:, :, np.newaxis]
             weight_sum += w
 
-    # ---------------------------------------------------------------------------
-    # 5. Нормировка (закон сохранения энергии)
-    # ---------------------------------------------------------------------------
-    # g(p) = result / W_p  — взвешенное среднее с Σ весов = 1
+    # нормируем - делим на сумму весов, чтобы энергия не утекала
     weight_sum = np.where(weight_sum < EPS, 1.0, weight_sum)
     result = result / weight_sum[:, :, np.newaxis]
 
     return result
 
 
-# ---------------------------------------------------------------------------
 # Тональная компрессия и сохранение
-# ---------------------------------------------------------------------------
 
 def tone_map_and_save(hdr: np.ndarray, output_path: str,
                       gamma: float = 2.2, exposure: float = 1.0):
@@ -831,9 +717,7 @@ def _save_ppm(img: np.ndarray, path: str):
         f.write(img.tobytes())
 
 
-# ---------------------------------------------------------------------------
-# Построение тестовой сцены — Корнельская коробка (из lab4)
-# ---------------------------------------------------------------------------
+# Построение тестовой сцены - Корнельская коробка (из lab4)
 
 def build_cornell_box() -> Tuple[Scene, Camera]:
     scene = Scene()
@@ -852,23 +736,23 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
         return [Triangle(np.array(v0), np.array(v1), np.array(v2), mat),
                 Triangle(np.array(v0), np.array(v2), np.array(v3), mat)]
 
-    # Пол
+    # пол
     scene.add_triangles(quad(
         [0,0,0],[1,0,0],[1,0,1],[0,0,1], white))
-    # Потолок
+    # потолок
     scene.add_triangles(quad(
         [0,1,0],[0,1,1],[1,1,1],[1,1,0], white))
-    # Задняя стена
+    # задняя стена
     scene.add_triangles(quad(
         [0,0,1],[1,0,1],[1,1,1],[0,1,1], white))
-    # Левая стена (красная)
+    # левая стена - красная
     scene.add_triangles(quad(
         [0,0,0],[0,0,1],[0,1,1],[0,1,0], red))
-    # Правая стена (зелёная)
+    # правая стена - зелёная
     scene.add_triangles(quad(
         [1,0,0],[1,1,0],[1,1,1],[1,0,1], green))
 
-    # Источник света на потолке
+    # свет на потолке
     scene.add_triangles(quad(
         [0.35,0.999,0.35],[0.65,0.999,0.35],
         [0.65,0.999,0.65],[0.35,0.999,0.65], light_mat))
@@ -903,7 +787,7 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
     scene.add_triangles(rotated_box(0.18, 0.0, 0.18,
                                     0.45, 0.3, 0.45, mixed, angle_deg=20))
 
-    # Камера
+    # камера
     camera = Camera(
         position = np.array([0.5, 0.5, -1.4]),
         look_at  = np.array([0.5, 0.5, 0.5]),
@@ -916,9 +800,7 @@ def build_cornell_box() -> Tuple[Scene, Camera]:
     return scene, camera
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     np.random.seed(42)
@@ -927,16 +809,16 @@ if __name__ == "__main__":
     print("Lab 5: Joint Bilateral Filter для Path Tracing")
     print("=" * 60)
 
-    # Параметры рендера
+    # настройки рендера
     SPP       = 64
     MAX_DEPTH = 8
     GAMMA     = 2.2
 
-    # Параметры билатерального фильтра
-    SIGMA_S = 2.5    # Пространственная сигма (меньше → меньше размытие)
-    SIGMA_Z = 0.05   # Сигма глубины
-    SIGMA_N = 0.08   # Сигма нормалей (меньше → резче геометрические границы)
-    RADIUS  = 6      # Радиус ядра (≈ 2 × sigma_s)
+    # настройки билатерального фильтра
+    SIGMA_S = 2.5    # Размер размытия (больше = сильнее шумодав, но могут замыться мелкие детали)
+    SIGMA_Z = 0.05   # Чувствительность к глубине (меньше = резче границы по глубине)
+    SIGMA_N = 0.08   # Чувствительность к нормалям (меньше = резче геометрические границы (рёбра бокса))
+    RADIUS  = 6      # размер окна (примерно 2 × sigma_s)
 
     print(f"\n--- Рендеринг с G-буферами (SPP={SPP}) ---")
     print("Построение сцены (Корнельская коробка)...")
@@ -944,7 +826,7 @@ if __name__ == "__main__":
     print(f"Треугольников: {len(scene.triangles)}")
     print(f"Источников:    {len(scene._lights)}")
 
-    # Шаг 1: Рендеринг с G-буферами
+    # шаг 1: рендерим и собираем G-буферы
     gbuf = render_with_gbuf(scene, camera, spp=SPP, max_depth=MAX_DEPTH)
 
     direct    = gbuf['direct_light']
@@ -953,13 +835,13 @@ if __name__ == "__main__":
     normal_map = gbuf['normal_map']
     obj_idx   = gbuf['object_index']
 
-    # Исходное (нефильтрованное) изображение
+    # собираем исходную (нефильтрованную) картинку
     total_unfiltered = direct + indirect
 
     print(f"\n--- Сохранение исходного изображения ---")
     tone_map_and_save(total_unfiltered, "cornell_unfiltered.ppm", gamma=GAMMA)
 
-    # Шаг 2: Joint Bilateral Filter для indirect_light
+    # шаг 2: фильтруем indirect через Joint Bilateral Filter
     print(f"\n--- Joint Bilateral Filter ---")
     print(f"Параметры: σ_s={SIGMA_S}, σ_z={SIGMA_Z}, σ_n={SIGMA_N}, "
           f"radius={RADIUS}")
@@ -979,13 +861,13 @@ if __name__ == "__main__":
     t_elapsed = time.time() - t_start
     print(f"\nФильтрация завершена за {t_elapsed:.1f} с")
 
-    # Шаг 3: Объединяем direct + filtered indirect
+    # шаг 3: склеиваем direct + отфильтрованный indirect
     total_filtered = direct + filtered_indirect
 
     print(f"\n--- Сохранение отфильтрованного изображения ---")
     tone_map_and_save(total_filtered, "cornell_filtered.ppm", gamma=GAMMA)
 
-    # Шаг 4: Проверка энергосбережения
+    # шаг 4: проверяем, что энергия не утекла
     print(f"\n--- Проверка энергосбережения ---")
     energy_before = np.sum(total_unfiltered)
     energy_after = np.sum(total_filtered)
@@ -994,8 +876,8 @@ if __name__ == "__main__":
     print(f"Энергия после фильтрации: {energy_after:.4f}")
     print(f"Отношение (после/до):  {energy_ratio:.6f}")
     if abs(energy_ratio - 1.0) < 0.01:
-        print("[✓] Энергосбережение выполняется (отклонение < 1%)")
+        print("Энергосбережение выполняется")
     else:
-        print("[!] Отклонение энергосбережения > 1% — проверьте параметры")
+        print("Отклонение энергосбережения")
 
     print("\nГотово!")
